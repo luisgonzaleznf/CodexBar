@@ -288,13 +288,13 @@ public enum ClaudeOAuthDelegatedRefreshCoordinator {
 
         // "Touch succeeded" must mean we actually observed the Claude keychain entry change.
         // Otherwise we end up in a long cooldown with still-expired credentials.
-        let changed = await self.waitForClaudeKeychainChange(
+        let observation = await self.waitForClaudeKeychainChange(
             from: baseline,
             readStrategy: configuration.readStrategy,
             keychainAccessDisabled: configuration.keychainAccessDisabled,
             configuration: configuration,
             timeout: min(max(timeout, 1), 2))
-        if changed {
+        if observation == .changed {
             self.recordAttempt(
                 now: now,
                 cooldown: self.defaultCooldownInterval,
@@ -302,6 +302,19 @@ public enum ClaudeOAuthDelegatedRefreshCoordinator {
                 state: state)
             self.log.info("Claude OAuth delegated refresh touch succeeded")
             return AttemptResult(.attemptedSucceeded)
+        }
+
+        // Why: an unreadable keychain proves nothing about the touch, so this stays retryable on the short
+        // cooldown rather than being recorded as a refusal. Adopting a credential the CLI may already have
+        // refreshed is the caller's job — see the unconditional silent sync in ClaudeUsageFetcher.
+        if observation == .indeterminate {
+            self.recordAttempt(
+                now: now,
+                cooldown: self.shortCooldownInterval,
+                profileIdentifier: profileIdentifier,
+                state: state)
+            self.log.warning("Claude OAuth delegated refresh could not observe the Claude keychain")
+            return AttemptResult(.attemptedFailed("Claude keychain was unreadable after the Claude CLI touch."))
         }
 
         // A touch *error* deliberately stays retryable even when nothing is readable: the error may be transient,
@@ -416,49 +429,65 @@ public enum ClaudeOAuthDelegatedRefreshCoordinator {
         return .securityFramework(fingerprint: self.currentClaudeKeychainFingerprint(configuration: configuration))
     }
 
+    /// Why: "the keychain did not change" and "the keychain could not be read" demand opposite responses —
+    /// the first is a real refresh failure, the second says nothing at all. Collapsing them into `Bool` reported a
+    /// live, freshly-rewritten keychain as unchanged and parked the account in a cooldown it never left.
+    enum KeychainChangeObservation: Equatable, Sendable {
+        case changed
+        case unchanged
+        case indeterminate
+    }
+
+    /// Why: an unreadable `current` is the whole bug — it used to fold into "unchanged", which reported a
+    /// keychain the Claude CLI had just rewritten as untouched.
+    static func classifyObservation<Value: Equatable>(
+        before: Value?,
+        current: Value?,
+        missingBaselineIsIndeterminate: Bool) -> KeychainChangeObservation
+    {
+        guard let current else { return .indeterminate }
+        if before == nil, missingBaselineIsIndeterminate { return .indeterminate }
+        return current == before ? .unchanged : .changed
+    }
+
     private static func waitForClaudeKeychainChange(
         from baseline: KeychainChangeObservationBaseline,
         readStrategy: ClaudeOAuthKeychainReadStrategy,
         keychainAccessDisabled: Bool,
         configuration: AttemptConfiguration?,
-        timeout: TimeInterval) async -> Bool
+        timeout: TimeInterval) async -> KeychainChangeObservation
     {
         // Prefer correctness but bound the delay. Keychain writes can be slightly delayed after the CLI touch.
         // Keep this short to avoid "prompt storms" on configurations where "no UI" queries can still surface UI.
         let clampedTimeout = max(0, min(timeout, 2))
-        if clampedTimeout == 0 { return false }
+        if clampedTimeout == 0 { return .indeterminate }
 
         let delays: [TimeInterval] = [0.2, 0.5, 0.8].filter { $0 <= clampedTimeout }
         let deadline = Date().addingTimeInterval(clampedTimeout)
 
-        func isObservedChange() -> Bool {
+        func observe() -> KeychainChangeObservation {
             switch baseline {
             case let .securityFramework(fingerprintBefore):
-                // Treat "no fingerprint" as "not observed"; we only succeed if we can read a fingerprint and it
-                // differs.
-                guard let current = self.currentClaudeKeychainFingerprintForObservation(configuration: configuration)
-                else {
-                    return false
-                }
-                return current != fingerprintBefore
+                self.classifyObservation(
+                    before: fingerprintBefore,
+                    current: self.currentClaudeKeychainFingerprintForObservation(configuration: configuration),
+                    missingBaselineIsIndeterminate: false)
             case let .securityCLI(dataBefore):
                 // In experimental mode, avoid Security.framework observation entirely and detect change from
-                // /usr/bin/security output only.
-                // If baseline capture failed (nil), treat observation as inconclusive and do not infer a change from
-                // a later successful read.
-                guard let dataBefore else { return false }
-                guard let current = self.currentClaudeKeychainDataViaSecurityCLIForObservation(
-                    readStrategy: readStrategy,
-                    keychainAccessDisabled: keychainAccessDisabled,
-                    interaction: .background)
-                else { return false }
-                return current != dataBefore
+                // /usr/bin/security output only. A failed baseline capture stays inconclusive here rather than
+                // letting a later successful read masquerade as a change.
+                self.classifyObservation(
+                    before: dataBefore,
+                    current: self.currentClaudeKeychainDataViaSecurityCLIForObservation(
+                        readStrategy: readStrategy,
+                        keychainAccessDisabled: keychainAccessDisabled,
+                        interaction: .background),
+                    missingBaselineIsIndeterminate: true)
             }
         }
 
-        if isObservedChange() {
-            return true
-        }
+        var observation = observe()
+        if observation == .changed { return .changed }
 
         for delay in delays {
             if Date() >= deadline { break }
@@ -466,15 +495,14 @@ public enum ClaudeOAuthDelegatedRefreshCoordinator {
                 try Task.checkCancellation()
                 try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             } catch {
-                return false
+                return observation
             }
 
-            if isObservedChange() {
-                return true
-            }
+            observation = observe()
+            if observation == .changed { return .changed }
         }
 
-        return false
+        return observation
     }
 
     private static func currentClaudeKeychainFingerprint(
