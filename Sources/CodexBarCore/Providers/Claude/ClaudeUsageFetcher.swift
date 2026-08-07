@@ -432,10 +432,14 @@ public struct ClaudeUsageFetcher: ClaudeUsageFetching, Sendable {
                 _ = ClaudeOAuthCredentialsStore.invalidateCacheIfCredentialsFileChanged(
                     environment: self.fetcher.environment)
 
-                let didSyncSilently = delegatedOutcome == .attemptedSucceeded
-                    && ClaudeOAuthCredentialsStore.syncFromClaudeKeychainWithoutPrompt(
-                        now: Date(),
-                        environment: self.fetcher.environment)
+                // Why: a touch changes nothing when the Claude CLI's own token is still valid, which reads as
+                // `.attemptedFailed` even though the keychain holds a perfectly good credential. Gating the sync on
+                // `.attemptedSucceeded` therefore skipped the one step that adopts it, pinning the card to an
+                // expired cache until a manual refresh. The sync never prompts and only adopts a non-expired
+                // credential, so attempting it on every outcome cannot regress a working account.
+                let didSyncSilently = ClaudeOAuthCredentialsStore.syncFromClaudeKeychainWithoutPrompt(
+                    now: Date(),
+                    environment: self.fetcher.environment)
 
                 let promptPolicy = ClaudeUsageFetcher.currentClaudeOAuthInteractivePromptPolicy()
                 ClaudeUsageFetcher.logDeferredBackgroundDelegatedRecoveryIfNeeded(
