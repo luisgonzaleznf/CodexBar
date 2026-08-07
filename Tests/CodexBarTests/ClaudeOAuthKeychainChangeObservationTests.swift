@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import CodexBarCore
 
-@Suite
+/// Regression coverage for #2733: an unreadable keychain must never read as "unchanged".
 struct ClaudeOAuthKeychainChangeObservationTests {
     private typealias Observation = ClaudeOAuthDelegatedRefreshCoordinator.KeychainChangeObservation
 
@@ -17,35 +17,35 @@ struct ClaudeOAuthKeychainChangeObservationTests {
             missingBaselineIsIndeterminate: missingBaselineIsIndeterminate)
     }
 
-    @Test("an unreadable current reading is indeterminate, never unchanged")
-    func unreadableCurrentIsIndeterminate() {
-        // The regression this guards: a background probe that could not read the keychain used to be reported as
-        // "did not change", which parked an account on an expired cached token until a manual refresh.
+    @Test
+    func `an unreadable current reading is indeterminate rather than unchanged`() {
+        // The regression this guards: a probe that could not read the keychain used to report "did not change",
+        // which parked an account on an expired cached token until a manual refresh.
         #expect(self.classify(before: "fingerprint-a", current: nil) == .indeterminate)
     }
 
-    @Test("an unreadable reading is distinct from an equal reading")
-    func indeterminateIsNotUnchanged() {
+    @Test
+    func `an unreadable reading stays distinct from an equal reading`() {
         let unreadable = self.classify(before: "fingerprint-a", current: nil)
         let equal = self.classify(before: "fingerprint-a", current: "fingerprint-a")
         #expect(unreadable != equal)
         #expect(equal == .unchanged)
     }
 
-    @Test("a differing reading is a change")
-    func differingReadingIsChange() {
+    @Test
+    func `a differing reading is a change`() {
         #expect(self.classify(before: "fingerprint-a", current: "fingerprint-b") == .changed)
     }
 
-    @Test("a missing baseline stays a change for Security.framework observation")
-    func missingBaselineIsChangeWhenNotStrict() {
+    @Test
+    func `a missing baseline stays a change for security framework observation`() {
         // Preserves pre-existing Security.framework behavior: something readable where nothing was readable
         // before still counts as movement.
         #expect(self.classify(before: nil, current: "fingerprint-a") == .changed)
     }
 
-    @Test("a missing baseline is inconclusive for security CLI observation")
-    func missingBaselineIsIndeterminateWhenStrict() {
+    @Test
+    func `a missing baseline is inconclusive for security CLI observation`() {
         #expect(
             self.classify(
                 before: nil,
@@ -53,8 +53,8 @@ struct ClaudeOAuthKeychainChangeObservationTests {
                 missingBaselineIsIndeterminate: true) == .indeterminate)
     }
 
-    @Test("both readings unreadable is indeterminate rather than unchanged")
-    func bothUnreadableIsIndeterminate() {
+    @Test
+    func `both readings unreadable is indeterminate rather than unchanged`() {
         #expect(self.classify(before: nil, current: nil) == .indeterminate)
     }
 }
