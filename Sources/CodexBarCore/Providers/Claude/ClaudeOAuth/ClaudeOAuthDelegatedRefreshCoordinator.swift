@@ -304,19 +304,6 @@ public enum ClaudeOAuthDelegatedRefreshCoordinator {
             return AttemptResult(.attemptedSucceeded)
         }
 
-        // Why: an unreadable keychain proves nothing about the touch, so this stays retryable on the short
-        // cooldown rather than being recorded as a refusal. Adopting a credential the CLI may already have
-        // refreshed is the caller's job — see the unconditional silent sync in ClaudeUsageFetcher.
-        if observation == .indeterminate {
-            self.recordAttempt(
-                now: now,
-                cooldown: self.shortCooldownInterval,
-                profileIdentifier: profileIdentifier,
-                state: state)
-            self.log.warning("Claude OAuth delegated refresh could not observe the Claude keychain")
-            return AttemptResult(.attemptedFailed("Claude keychain was unreadable after the Claude CLI touch."))
-        }
-
         // A touch *error* deliberately stays retryable even when nothing is readable: the error may be transient,
         // and on older Claude Code a retried touch can still create the credentials file. Only the
         // completes-cleanly-but-unobservable variant is provably terminal.
@@ -327,6 +314,10 @@ public enum ClaudeOAuthDelegatedRefreshCoordinator {
             cooldown: unreadable ? self.defaultCooldownInterval : self.shortCooldownInterval,
             profileIdentifier: profileIdentifier,
             state: state)
+        // Why: this verdict must be reached before the indeterminate branch below. A profile whose keychain
+        // CodexBar cannot read produces an indeterminate observation *and* satisfies this terminal condition;
+        // answering "retry shortly" there would drop `isUnreadableAfterRefresh`, lose the "switch source"
+        // guidance, and relaunch the CLI on the short cooldown forever (the loop #2650 removed).
         if unreadable {
             self.log.warning("Claude OAuth delegated refresh produced no readable credential source")
             return AttemptResult(
@@ -340,6 +331,14 @@ public enum ClaudeOAuthDelegatedRefreshCoordinator {
                 metadata: ["errorType": errorType])
             self.log.debug("Claude OAuth delegated refresh touch error: \(touchError.localizedDescription)")
             return AttemptResult(.attemptedFailed(touchError.localizedDescription))
+        }
+
+        // Why: reaching here means the profile is readable in principle, so an unobservable keychain says nothing
+        // about the touch and stays retryable on the short cooldown already recorded above — distinct from having
+        // observed the entry genuinely not move.
+        if observation == .indeterminate {
+            self.log.warning("Claude OAuth delegated refresh could not observe the Claude keychain")
+            return AttemptResult(.attemptedFailed("Claude keychain was unreadable after the Claude CLI touch."))
         }
 
         self.log.warning("Claude OAuth delegated refresh touch did not update Claude keychain")

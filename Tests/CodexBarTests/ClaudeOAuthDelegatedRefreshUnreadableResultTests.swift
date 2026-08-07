@@ -50,6 +50,7 @@ struct ClaudeOAuthDelegatedRefreshUnreadableResultTests {
     private func attemptWithUnreadableKeychain(
         credentialsURL: URL,
         now: Date,
+        fingerprint: ClaudeOAuthCredentialsStore.ClaudeKeychainFingerprint? = Self.unchangedFingerprint,
         touchAuthPath: @escaping @Sendable (TimeInterval, [String: String]) async throws -> Void)
         async throws -> ClaudeOAuthDelegatedRefreshCoordinator.AttemptResult
     {
@@ -62,7 +63,7 @@ struct ClaudeOAuthDelegatedRefreshUnreadableResultTests {
                             defer { ClaudeOAuthDelegatedRefreshCoordinator.resetForTesting() }
                             return try await ClaudeOAuthDelegatedRefreshCoordinator
                                 .withKeychainFingerprintOverrideForTesting {
-                                    Self.unchangedFingerprint
+                                    fingerprint
                                 } operation: {
                                     try await ClaudeOAuthDelegatedRefreshCoordinator
                                         .withCLIAvailableOverrideForTesting(true) {
@@ -95,6 +96,26 @@ struct ClaudeOAuthDelegatedRefreshUnreadableResultTests {
 
         #expect(outcome.isUnreadableAfterRefresh)
         // The touch still runs: on older Claude Code it can create the credentials file we would then read.
+        #expect(touches.count() == 1)
+    }
+
+    @Test
+    func `unreadable refresh result outranks an unobservable keychain`() async throws {
+        // An unreadable profile also yields an indeterminate observation, since the fingerprint cannot be read.
+        // The terminal verdict must still win: answering "retry shortly" here would drop the switch-source
+        // guidance and put the CLI back on a short-cooldown relaunch loop.
+        let root = try self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let touches = UnreadableResultTouchCounter()
+        let outcome = try await self.attemptWithUnreadableKeychain(
+            credentialsURL: root.appendingPathComponent(".credentials.json"),
+            now: Date(timeIntervalSince1970: 70000),
+            fingerprint: nil,
+            touchAuthPath: { _, _ in touches.increment() })
+
+        #expect(outcome.isUnreadableAfterRefresh)
+        #expect(outcome.outcome == .attemptedFailed("No readable Claude credential source after the Claude CLI touch."))
         #expect(touches.count() == 1)
     }
 
