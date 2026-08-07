@@ -57,11 +57,24 @@ struct ClaudeOAuthDelegatedRefreshLinuxTests {
     }
 
     @Test
-    func appOAuthBackgroundRespectsPlatformKeychainPromptPolicy() async {
+    func appOAuthBackgroundRespectsPlatformKeychainPromptPolicy() async throws {
+        // A credentials file means a delegated refresh could still hand something back, so the retry
+        // suggestion is genuine and must be preserved.
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("codexbar-linux-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let credentialsURL = root.appendingPathComponent(".credentials.json")
+        let expiresAt = Int(Date(timeIntervalSinceNow: 3600).timeIntervalSince1970 * 1000)
+        try Data("""
+        {"claudeAiOauth":{"accessToken":"t","expiresAt":\(expiresAt),"scopes":["user:profile"]}}
+        """.utf8).write(to: credentialsURL)
+
         let result = await self.runDelegatedRefresh(
             runtime: .app,
             interaction: .background,
-            promptMode: .onlyOnUserAction)
+            promptMode: .onlyOnUserAction,
+            credentialsURL: credentialsURL)
 
         #expect(result.attempts == 0)
         #expect(result.message.contains("background repair is suppressed"))
@@ -69,10 +82,29 @@ struct ClaudeOAuthDelegatedRefreshLinuxTests {
         #expect(!result.message.contains("Open the CodexBar menu or"))
     }
 
+    @Test
+    func appOAuthBackgroundReportsUnrecoverableProfileInsteadOfSuggestingRefresh() async {
+        // No credentials file and no readable Claude Keychain item: a refresh cannot restore this profile,
+        // so "Click Refresh" would send the user round a loop that always lands back here.
+        let result = await self.runDelegatedRefresh(
+            runtime: .app,
+            interaction: .background,
+            promptMode: .onlyOnUserAction)
+
+        #expect(result.attempts == 0)
+        #expect(result.message == ClaudeUsageFetcher.unreadableCredentialsMessage)
+        #expect(!result.message.contains("Click Refresh in the CodexBar menu"))
+    }
+
     private func runDelegatedRefresh(
         runtime: ProviderRuntime,
         interaction: ProviderInteraction,
-        promptMode: ClaudeOAuthKeychainPromptMode) async -> (attempts: Int, message: String)
+        promptMode: ClaudeOAuthKeychainPromptMode,
+        // Pinned so the suppression message does not depend on whether the host running the tests happens to
+        // have a Claude credentials file: its presence decides whether a refresh could restore this profile.
+        credentialsURL: URL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("codexbar-absent-\(UUID().uuidString)")
+            .appendingPathComponent(".credentials.json")) async -> (attempts: Int, message: String)
     {
         let counter = Counter()
         let fetcher = ClaudeUsageFetcher(
@@ -95,15 +127,17 @@ struct ClaudeOAuthDelegatedRefreshLinuxTests {
             }
 
         do {
-            _ = try await ClaudeOAuthKeychainPromptPreference.withTaskOverrideForTesting(promptMode) {
-                try await ProviderInteractionContext.$current.withValue(interaction) {
-                    try await ClaudeUsageFetcher.$loadOAuthCredentialsOverride
-                        .withValue(credentialsOverride) {
-                            try await ClaudeUsageFetcher.$delegatedRefreshAttemptOverride
-                                .withValue(delegatedOverride) {
-                                    try await fetcher.loadLatestUsage(model: "sonnet")
-                                }
-                        }
+            _ = try await ClaudeOAuthCredentialsStore.withCredentialsURLOverrideForTesting(credentialsURL) {
+                try await ClaudeOAuthKeychainPromptPreference.withTaskOverrideForTesting(promptMode) {
+                    try await ProviderInteractionContext.$current.withValue(interaction) {
+                        try await ClaudeUsageFetcher.$loadOAuthCredentialsOverride
+                            .withValue(credentialsOverride) {
+                                try await ClaudeUsageFetcher.$delegatedRefreshAttemptOverride
+                                    .withValue(delegatedOverride) {
+                                        try await fetcher.loadLatestUsage(model: "sonnet")
+                                    }
+                            }
+                    }
                 }
             }
             Issue.record("Expected delegated-refresh path to fail with mocked stale credentials")

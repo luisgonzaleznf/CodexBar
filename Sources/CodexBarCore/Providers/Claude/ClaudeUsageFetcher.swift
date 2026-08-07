@@ -191,7 +191,7 @@ public struct ClaudeUsageFetcher: ClaudeUsageFetching, Sendable {
         self.configuration.browserDetection
     }
 
-    private struct ClaudeOAuthKeychainPromptPolicy {
+    struct ClaudeOAuthKeychainPromptPolicy {
         let mode: ClaudeOAuthKeychainPromptMode
         let isApplicable: Bool
         let interaction: ProviderInteraction
@@ -243,9 +243,10 @@ public struct ClaudeUsageFetcher: ClaudeUsageFetching, Sendable {
             interaction: ProviderInteractionContext.current)
     }
 
-    private static func assertDelegatedRefreshAllowedInCurrentInteraction(
+    static func assertDelegatedRefreshAllowedInCurrentInteraction(
         policy: ClaudeOAuthKeychainPromptPolicy,
-        allowBackgroundDelegatedRefresh: Bool) throws
+        allowBackgroundDelegatedRefresh: Bool,
+        isProvablyUnreadable: Bool) throws
     {
         if policy.mode == .never {
             throw ClaudeUsageError.oauthFailed("Delegated refresh is disabled by 'never' keychain policy.")
@@ -254,6 +255,12 @@ public struct ClaudeUsageFetcher: ClaudeUsageFetching, Sendable {
            policy.interaction != .userInitiated,
            !allowBackgroundDelegatedRefresh
         {
+            // Why: "Click Refresh" is a loop for a profile no refresh can restore — the user clicks, the
+            // delegated path reaches its terminal verdict, and the next background poll overwrites that verdict
+            // with this message again. Report the terminal outcome the delegated path would reach anyway.
+            if isProvablyUnreadable {
+                throw ClaudeUsageError.oauthFailed(unreadableCredentialsMessage)
+            }
             throw ClaudeUsageError.oauthFailed(
                 "Claude OAuth token expired, but background repair is suppressed when Keychain prompt policy "
                     + "is set to only prompt on user action. Click Refresh in the CodexBar menu to retry.")
@@ -403,7 +410,9 @@ public struct ClaudeUsageFetcher: ClaudeUsageFetching, Sendable {
             let delegatedPromptPolicy = ClaudeUsageFetcher.currentClaudeOAuthDelegatedRefreshPolicy()
             try ClaudeUsageFetcher.assertDelegatedRefreshAllowedInCurrentInteraction(
                 policy: delegatedPromptPolicy,
-                allowBackgroundDelegatedRefresh: self.fetcher.allowBackgroundDelegatedRefresh)
+                allowBackgroundDelegatedRefresh: self.fetcher.allowBackgroundDelegatedRefresh,
+                isProvablyUnreadable: ClaudeUsageFetcher.isDelegatedRefreshProvablyUnreadable(
+                    environment: self.fetcher.environment))
 
             let delegatedResult = await ClaudeUsageFetcher.attemptDelegatedRefresh(
                 environment: self.fetcher.environment)

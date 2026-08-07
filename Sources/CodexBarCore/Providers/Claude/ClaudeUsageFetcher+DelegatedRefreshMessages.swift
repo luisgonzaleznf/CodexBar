@@ -2,6 +2,20 @@ import Foundation
 
 /// Split out of `ClaudeUsageFetcher.swift` to keep that file within the file-length limit.
 extension ClaudeUsageFetcher {
+    /// Not "run `claude login`, then retry": that refreshes Claude Code's own Keychain item, which this build
+    /// never reads, so the same expired cache comes back.
+    static let unreadableCredentialsMessage =
+        "Claude OAuth credentials expired and CodexBar cannot read them back. Claude Code owns the "
+            + "Keychain item and no credentials file is present for this profile, so refreshing will not "
+            + "restore usage. Switch Claude Usage source to Web/CLI."
+
+    /// True when no refresh can restore this profile: CodexBar never reads Claude Code's Keychain item in
+    /// production, so with no credentials file there is nothing a delegated refresh could hand back.
+    static func isDelegatedRefreshProvablyUnreadable(environment: [String: String]) -> Bool {
+        guard !ClaudeOAuthCredentialsStore.keychainAccessAllowed else { return false }
+        return !ClaudeOAuthCredentialsStore.hasSelectedProfileOAuthCredentialsFile(environment: environment)
+    }
+
     static func delegatedRefreshOutcomeLabel(
         _ outcome: ClaudeOAuthDelegatedRefreshCoordinator.Outcome) -> String
     {
@@ -30,11 +44,7 @@ extension ClaudeUsageFetcher {
         }
 
         if result.isUnreadableAfterRefresh {
-            // Not "run `claude login`, then retry": that refreshes Claude Code's own Keychain item, which this
-            // build never reads, so the same expired cache comes back.
-            return "Claude OAuth credentials expired and CodexBar cannot read them back. Claude Code owns the "
-                + "Keychain item and no credentials file is present for this profile, so refreshing will not "
-                + "restore usage. Switch Claude Usage source to Web/CLI."
+            return Self.unreadableCredentialsMessage
         }
 
         switch result.outcome {

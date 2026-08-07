@@ -269,6 +269,19 @@ struct ClaudeUsageTests {
         let loadCounter = AsyncCounter()
         let delegatedCounter = AsyncCounter()
 
+        // Pinned: a present credentials file means a refresh could still restore this profile, which is what
+        // makes the retry suggestion below genuine. Without pinning, the message would depend on whether the
+        // host running the tests happens to have one.
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("codexbar-delegated-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let credentialsURL = root.appendingPathComponent(".credentials.json")
+        let expiresAt = Int(Date(timeIntervalSinceNow: 3600).timeIntervalSince1970 * 1000)
+        try Data("""
+        {"claudeAiOauth":{"accessToken":"t","expiresAt":\(expiresAt),"scopes":["user:profile"]}}
+        """.utf8).write(to: credentialsURL)
+
         let fetcher = ClaudeUsageFetcher(
             browserDetection: BrowserDetection(cacheTTL: 0),
             environment: [:],
@@ -291,23 +304,27 @@ struct ClaudeUsageTests {
         }
 
         do {
-            _ = try await ClaudeOAuthKeychainReadStrategyPreference.withTaskOverrideForTesting(
-                .securityFramework,
-                operation: {
-                    try await ClaudeOAuthKeychainPromptPreference.withTaskOverrideForTesting(.onlyOnUserAction) {
-                        try await ProviderInteractionContext.$current.withValue(.background) {
-                            try await ClaudeUsageFetcher.$delegatedRefreshAttemptOverride.withValue(
-                                delegatedOverride)
-                            {
-                                try await ClaudeUsageFetcher.$loadOAuthCredentialsOverride.withValue(
-                                    loadCredsOverride)
+            _ = try await ClaudeOAuthCredentialsStore.withCredentialsURLOverrideForTesting(credentialsURL) {
+                try await ClaudeOAuthKeychainReadStrategyPreference.withTaskOverrideForTesting(
+                    .securityFramework,
+                    operation: {
+                        try await ClaudeOAuthKeychainPromptPreference
+                            .withTaskOverrideForTesting(.onlyOnUserAction)
+                        {
+                            try await ProviderInteractionContext.$current.withValue(.background) {
+                                try await ClaudeUsageFetcher.$delegatedRefreshAttemptOverride.withValue(
+                                    delegatedOverride)
                                 {
-                                    try await fetcher.loadLatestUsage(model: "sonnet")
+                                    try await ClaudeUsageFetcher.$loadOAuthCredentialsOverride.withValue(
+                                        loadCredsOverride)
+                                    {
+                                        try await fetcher.loadLatestUsage(model: "sonnet")
+                                    }
                                 }
                             }
                         }
-                    }
-                })
+                    })
+            }
             Issue.record("Expected delegated refresh to be suppressed in background")
         } catch let error as ClaudeUsageError {
             guard case let .oauthFailed(message) = error else {
