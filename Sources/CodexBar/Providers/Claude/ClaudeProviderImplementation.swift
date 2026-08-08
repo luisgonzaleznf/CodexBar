@@ -26,6 +26,7 @@ struct ClaudeProviderImplementation: ProviderImplementation {
         _ = settings.claudeOAuthDirectKeychainReadAllowed
         _ = settings.claudeOAuthKeychainReadStrategy
         _ = settings.claudeWebExtrasEnabled
+        _ = settings.claudeStatusLineFeedEnabled
         _ = settings.claudeSwapEnabled
         _ = settings.claudeSwapShowSingleAccount
         _ = settings.claudeSwapExecutablePath
@@ -136,6 +137,20 @@ struct ClaudeProviderImplementation: ProviderImplementation {
                 actions: [],
                 isVisible: nil,
                 isEnabled: { !context.settings.debugDisableKeychainAccess },
+                onChange: nil,
+                onAppDidBecomeActive: nil,
+                onAppearWhenEnabled: nil),
+            ProviderSettingsToggleDescriptor(
+                id: "claude-statusline-feed",
+                title: "Read usage from your Claude statusLine",
+                subtitle: "Uses the rate limits Claude Code publishes to your own statusLine command, so the "
+                    + "card stays current between polls. Composes with OAuth/CLI and never replaces them. "
+                    + "Requires a statusLine helper you configure — see docs/claude-statusline-feed.md.",
+                binding: context.boolBinding(\.claudeStatusLineFeedEnabled),
+                statusText: nil,
+                actions: [],
+                isVisible: nil,
+                isEnabled: nil,
                 onChange: nil,
                 onAppDidBecomeActive: nil,
                 onAppearWhenEnabled: nil),

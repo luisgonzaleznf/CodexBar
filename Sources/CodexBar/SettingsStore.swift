@@ -384,6 +384,7 @@ final class SettingsStore {
                 self.claudeWebExtrasEnabled = false
             } else {
                 self.defaultsState.claudeWebExtrasEnabledRaw = false
+                self.defaultsState.claudeStatusLineFeedEnabledRaw = false
             }
         }
         let resolvedOpenAIWebAccessEnabled = if hasStoredOpenAIWebAccessPreference {
@@ -521,6 +522,9 @@ extension SettingsStore {
         let claudeOAuthDirectKeychainReadAllowed = userDefaults.object(
             forKey: ClaudeOAuthDirectKeychainReadConsent.userDefaultsKey) as? Bool ?? false
         let claudeWebExtrasEnabledRaw = userDefaults.object(forKey: "claudeWebExtrasEnabled") as? Bool ?? false
+        // Off unless the user opts in (owner ruling, #2733).
+        let claudeStatusLineFeedEnabledRaw = userDefaults
+            .object(forKey: "claudeStatusLineFeedEnabled") as? Bool ?? false
         let creditsExtrasDefault = userDefaults.object(forKey: "showOptionalCreditsAndExtraUsage") as? Bool
         let showOptionalCreditsAndExtraUsage = creditsExtrasDefault ?? true
         if Self.isRunningTests, creditsExtrasDefault == nil {
@@ -645,6 +649,7 @@ extension SettingsStore {
             claudeOAuthKeychainReadStrategyRaw: claudeOAuthKeychainReadStrategyRaw,
             claudeOAuthDirectKeychainReadAllowed: claudeOAuthDirectKeychainReadAllowed,
             claudeWebExtrasEnabledRaw: claudeWebExtrasEnabledRaw,
+            claudeStatusLineFeedEnabledRaw: claudeStatusLineFeedEnabledRaw,
             showOptionalCreditsAndExtraUsage: showOptionalCreditsAndExtraUsage,
             claudeDailyRoutinesUsageVisible: claudeDailyRoutinesUsageVisible,
             claudeModelScopedWeeklyUsageVisible: claudeModelScopedWeeklyUsageVisible,
