@@ -260,6 +260,9 @@ extension UsageMenuCardView.Model {
 
         // The statusLine feed reports numbers the user's own Claude configuration published, so the card has to
         // say where they came from rather than presenting them as a CodexBar reading (owner ruling, #2733).
+        //
+        // Must precede the dataConfidence check below: a composed feed snapshot inherits its confidence from the
+        // previous poll, so a prior CLI scrape would otherwise label live statusLine windows as CLI-sourced.
         if input.provider == .claude, Self.isClaudeStatusLineSource(input.sourceLabel) {
             return [L("From your Claude statusLine config")] + subscriptionNotes
         }

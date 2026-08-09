@@ -21,7 +21,9 @@ extension UsageStore {
         return lhsKey == rhsKey
     }
 
-    private struct ProviderRefreshOutcomeContext {
+    // Internal rather than private: the Claude statusLine composition helper lives in its own file to
+    // keep this one within the file-length limit, and needs this context type.
+    struct ProviderRefreshOutcomeContext {
         let generation: UInt64
         let claudeUsesConsumerAutoPipeline: Bool
         let codexExpectedGuard: CodexAccountScopedRefreshGuard?
@@ -712,9 +714,10 @@ extension UsageStore {
             } else {
                 self.lastKnownResetSnapshots[provider.instanceID]
             }
-            let profileStable = self.preservingDeepSeekProfileCatalog(in: accountScoped, provider: provider)
+            // nil means the partial statusLine feed cannot be attributed safely; see the helper.
+            guard let merged = self.composedSnapshot(accountScoped, provider, result, context) else { return nil }
             let stabilized = Self.commandCodeSnapshotResolvingDepletionOnEnrichmentFailure(
-                current: profileStable,
+                current: self.preservingDeepSeekProfileCatalog(in: merged, provider: provider),
                 previous: self.snapshots[provider.instanceID])
             let backfilled = stabilized.backfillingResetTimes(from: resetBackfillSource)
             let warningAccountDiscriminator = Self.warningAccountDiscriminator(
