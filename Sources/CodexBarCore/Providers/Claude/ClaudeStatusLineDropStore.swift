@@ -69,14 +69,16 @@ public enum ClaudeStatusLineDropStore {
     /// Deliberately partial: this feed carries no identity, plan, model-scoped weekly, Daily Routines or extra
     /// usage. Those rows come from the polled sources, so the caller must merge rather than replace.
     public static func makeSnapshot(from limits: ClaudeStatusLineRateLimits) -> ClaudeUsageSnapshot? {
-        let fiveHour = limits.fiveHour.map { self.window($0, minutes: 300) }
+        // Why: this snapshot is composed over a previous one, where `primary` is the session lane. Promoting a
+        // weekly-only observation into `primary` — as the OAuth mapping does for a standalone snapshot — would
+        // render the 7-day figure as the Session row while the real weekly row survived beside it. A weekly-only
+        // payload is therefore absence rather than a lane-shifted guess.
+        guard let fiveHour = limits.fiveHour.map({ self.window($0, minutes: 300) }) else { return nil }
         let sevenDay = limits.sevenDay.map { self.window($0, minutes: 10080) }
-        // Mirrors the OAuth mapping: the weekly window is promoted when no five-hour window is present.
-        guard let primary = fiveHour ?? sevenDay else { return nil }
 
         return ClaudeUsageSnapshot(
-            primary: primary,
-            secondary: fiveHour == nil ? nil : sevenDay,
+            primary: fiveHour,
+            secondary: sevenDay,
             opus: nil,
             updatedAt: limits.capturedAt,
             accountEmail: nil,

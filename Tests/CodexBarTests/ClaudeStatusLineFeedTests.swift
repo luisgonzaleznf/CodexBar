@@ -148,11 +148,21 @@ struct ClaudeStatusLineFeedTests {
     // MARK: - Snapshot mapping
 
     @Test
-    func `a weekly only observation is promoted to the primary window`() throws {
+    func `a weekly only observation is dropped rather than shifted into the session lane`() {
+        // This snapshot is composed over a previous one where primary is the session lane, so promoting a
+        // weekly-only reading — as the standalone OAuth mapping does — would render the 7-day figure as the
+        // Session row while the real weekly row survived beside it.
         let weeklyOnly = self.limits(configDir: nil, capturedAt: Date(), fiveHour: nil, sevenDay: 55)
-        let snapshot = try #require(ClaudeStatusLineDropStore.makeSnapshot(from: weeklyOnly))
-        #expect(snapshot.primary.usedPercent == 55)
-        #expect(snapshot.primary.windowMinutes == 10080)
+        #expect(ClaudeStatusLineDropStore.makeSnapshot(from: weeklyOnly) == nil)
+    }
+
+    @Test
+    func `a session only observation keeps its lane and leaves the weekly row alone`() throws {
+        let sessionOnly = self.limits(configDir: nil, capturedAt: Date(), fiveHour: 33, sevenDay: nil)
+        let snapshot = try #require(ClaudeStatusLineDropStore.makeSnapshot(from: sessionOnly))
+        #expect(snapshot.primary.usedPercent == 33)
+        #expect(snapshot.primary.windowMinutes == 300)
+        // Absent weekly means "no update" — composition keeps the previous weekly row.
         #expect(snapshot.secondary == nil)
     }
 

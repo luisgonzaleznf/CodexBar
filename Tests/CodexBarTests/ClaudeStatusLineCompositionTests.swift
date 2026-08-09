@@ -47,7 +47,8 @@ struct ClaudeStatusLineCompositionTests {
             current: self.feedSnapshot(),
             previous: self.polledSnapshot(),
             sourceLabel: "statusline",
-            accountIsStable: true))
+            accountIsStable: true,
+            ownsPreviousRows: true))
 
         // Windows come from the live feed.
         #expect(composed.primary?.usedPercent == 77)
@@ -70,7 +71,8 @@ struct ClaudeStatusLineCompositionTests {
                 current: polled,
                 previous: self.feedSnapshot(),
                 sourceLabel: label,
-                accountIsStable: true))
+                accountIsStable: true,
+                ownsPreviousRows: true))
             // Composition must not touch the polled sources' own results.
             #expect(result.identity?.accountEmail == "person@example.com")
             #expect(result.primary?.usedPercent == 10)
@@ -84,7 +86,8 @@ struct ClaudeStatusLineCompositionTests {
             current: self.feedSnapshot(),
             previous: nil,
             sourceLabel: "statusline",
-            accountIsStable: true))
+            accountIsStable: true,
+            ownsPreviousRows: true))
         #expect(composed.primary?.usedPercent == 77)
         #expect(composed.identity == nil)
     }
@@ -97,7 +100,8 @@ struct ClaudeStatusLineCompositionTests {
             current: self.feedSnapshot(),
             previous: self.polledSnapshot(),
             sourceLabel: "statusline",
-            accountIsStable: false) == nil)
+            accountIsStable: false,
+            ownsPreviousRows: true) == nil)
     }
 
     @Test
@@ -107,7 +111,32 @@ struct ClaudeStatusLineCompositionTests {
             current: self.polledSnapshot(),
             previous: self.polledSnapshot(),
             sourceLabel: "oauth",
-            accountIsStable: false))
+            accountIsStable: false,
+            ownsPreviousRows: true))
+        #expect(result.identity?.accountEmail == "person@example.com")
+    }
+
+    @Test
+    func `a feed cannot compose over rows produced by a different account`() {
+        // accountIsStable only proves the account held still during this fetch. If the user switched accounts
+        // and the first refresh afterwards is served by the feed, nothing re-read the account — so ownership of
+        // the rows being composed over has to be established separately.
+        #expect(UsageStore.claudeSnapshotComposingStatusLineFeed(
+            current: self.feedSnapshot(),
+            previous: self.polledSnapshot(),
+            sourceLabel: "statusline",
+            accountIsStable: true,
+            ownsPreviousRows: false) == nil)
+    }
+
+    @Test
+    func `ownership is irrelevant to a normally polled result`() throws {
+        let result = try #require(UsageStore.claudeSnapshotComposingStatusLineFeed(
+            current: self.polledSnapshot(),
+            previous: self.polledSnapshot(),
+            sourceLabel: "oauth",
+            accountIsStable: true,
+            ownsPreviousRows: false))
         #expect(result.identity?.accountEmail == "person@example.com")
     }
 
@@ -122,7 +151,8 @@ struct ClaudeStatusLineCompositionTests {
             current: weeklyOnly,
             previous: self.polledSnapshot(),
             sourceLabel: "statusline",
-            accountIsStable: true))
+            accountIsStable: true,
+            ownsPreviousRows: true))
         #expect(composed.primary?.usedPercent == 66)
         // An absent window means "no update", not "cleared".
         #expect(composed.secondary?.usedPercent == 20)

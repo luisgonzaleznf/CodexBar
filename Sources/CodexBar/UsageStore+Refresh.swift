@@ -21,8 +21,8 @@ extension UsageStore {
         return lhsKey == rhsKey
     }
 
-    // Internal rather than private: the Claude statusLine composition helper lives in its own file to
-    // keep this one within the file-length limit, and needs this context type.
+    /// Internal rather than private: the Claude statusLine composition helper lives in its own file to
+    /// keep this one within the file-length limit, and needs this context type.
     struct ProviderRefreshOutcomeContext {
         let generation: UInt64
         let claudeUsesConsumerAutoPipeline: Bool
@@ -741,7 +741,7 @@ extension UsageStore {
                 self.handleCodexResetCreditNotifications(snapshot: backfilled)
             }
             self.lastKnownResetSnapshots[provider.instanceID] = backfilled
-            self.snapshots[provider.instanceID] = backfilled
+            self.storeSnapshot(backfilled, provider: provider, sourceLabel: result.sourceLabel)
             self.widgetUsagePreservationBlockedProviders.remove(provider.instanceID)
             if provider == .deepseek {
                 self.clearDeepSeekProfileTransition()

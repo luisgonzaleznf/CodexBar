@@ -168,6 +168,11 @@ final class UsageStore {
     var diagnostics: [ProviderInstanceID: String] = [:]
     var geminiObservedConsumerTierDeprecation = false
     var knownLimitsAvailabilityByProvider: [ProviderInstanceID: UsageLimitsAvailability] = [:]
+    /// Claude account UUID that was active when the stored Claude snapshot was produced.
+    ///
+    /// The statusLine feed carries no identity, so this is the only way to know whether the rows it would be
+    /// composed over belong to the account that is active now — a swap within one profile is otherwise invisible.
+    var claudeSnapshotAccountUuid: String?
     var lastSourceLabels: [ProviderInstanceID: String] = [:]
     var lastFetchAttempts: [ProviderInstanceID: [ProviderFetchAttempt]] = [:]
     var accountSnapshots: [ProviderInstanceID: [TokenAccountUsageSnapshot]] = [:]

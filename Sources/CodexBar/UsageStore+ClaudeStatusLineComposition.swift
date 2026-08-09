@@ -16,7 +16,8 @@ extension UsageStore {
             current: scoped,
             previous: self.snapshots[provider.instanceID],
             sourceLabel: provider == .claude ? result.sourceLabel : nil,
-            accountIsStable: context.claudeOAuthActiveAccountObservation != .changed)
+            accountIsStable: context.claudeOAuthActiveAccountObservation != .changed,
+            ownsPreviousRows: self.claudeStatusLineOwnsPreviousRows())
         else { return nil }
         return composed
     }
@@ -34,15 +35,45 @@ extension UsageStore {
         current: UsageSnapshot,
         previous: UsageSnapshot?,
         sourceLabel: String?,
-        accountIsStable: Bool) -> UsageSnapshot?
+        accountIsStable: Bool,
+        ownsPreviousRows: Bool) -> UsageSnapshot?
     {
         guard self.isClaudeStatusLineSourceLabel(sourceLabel) else { return current }
         // Nothing to compose with: no prior rows exist, so none can be lost. Publishing the windows alone is
         // additive rather than destructive.
         guard let previous else { return current }
-        guard accountIsStable else { return nil }
+        guard accountIsStable, ownsPreviousRows else { return nil }
 
         return current.composingOverPreviousClaudeSnapshot(previous)
+    }
+
+    /// True when the account that produced the stored Claude rows is still the active one.
+    ///
+    /// `claudeOAuthActiveAccountObservation` only proves the account held still during *this* fetch. If the user
+    /// switched accounts and the first refresh afterwards is served by the statusLine file, nothing in that fetch
+    /// re-read the account, so stability alone would let the new account's windows sit under the old account's
+    /// identity. An unknown account on either side is treated as not-owned rather than assumed equal.
+    func claudeStatusLineOwnsPreviousRows(
+        environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool
+    {
+        guard let recorded = self.claudeSnapshotAccountUuid,
+              let active = ClaudeAccountProfile.accountUuid(environment: environment)
+        else { return false }
+        return recorded == active
+    }
+
+    /// Stores a provider snapshot, recording which Claude account produced it.
+    func storeSnapshot(_ snapshot: UsageSnapshot, provider: UsageProvider, sourceLabel: String?) {
+        self.snapshots[provider.instanceID] = snapshot
+        self.recordClaudeSnapshotAccount(provider: provider, sourceLabel: sourceLabel)
+    }
+
+    /// Records the account behind a stored Claude snapshot. The feed carries no identity, so a snapshot it
+    /// produced must not become the ownership evidence for the next one.
+    func recordClaudeSnapshotAccount(provider: UsageProvider, sourceLabel: String?) {
+        guard provider == .claude, !Self.isClaudeStatusLineSourceLabel(sourceLabel) else { return }
+        self.claudeSnapshotAccountUuid = ClaudeAccountProfile.accountUuid(
+            environment: ProcessInfo.processInfo.environment)
     }
 
     static func isClaudeStatusLineSourceLabel(_ sourceLabel: String?) -> Bool {
