@@ -12,10 +12,13 @@ extension UsageStore {
         _ result: ProviderFetchResult,
         _ context: ProviderRefreshOutcomeContext) -> UsageSnapshot?
     {
+        // Provider-specific by design: the statusLine feed is a Claude-only source, so every other provider
+        // must reach the composition helper with no source label and pass straight through it.
+        let claudeSourceLabel = provider == .claude ? result.sourceLabel : nil
         guard let composed = Self.claudeSnapshotComposingStatusLineFeed(
             current: scoped,
             previous: self.snapshots[provider.instanceID],
-            sourceLabel: provider == .claude ? result.sourceLabel : nil,
+            sourceLabel: claudeSourceLabel,
             accountIsStable: context.claudeOAuthActiveAccountObservation != .changed,
             ownsPreviousRows: self.claudeStatusLineOwnsPreviousRows())
         else { return nil }
@@ -71,6 +74,8 @@ extension UsageStore {
     /// Records the account behind a stored Claude snapshot. The feed carries no identity, so a snapshot it
     /// produced must not become the ownership evidence for the next one.
     func recordClaudeSnapshotAccount(provider: UsageProvider, sourceLabel: String?) {
+        // Provider-specific by design: only Claude has a statusLine feed whose identity-free snapshots must be
+        // excluded from becoming the ownership evidence for the next composition.
         guard provider == .claude, !Self.isClaudeStatusLineSourceLabel(sourceLabel) else { return }
         self.claudeSnapshotAccountUuid = ClaudeAccountProfile.accountUuid(
             environment: ProcessInfo.processInfo.environment)
