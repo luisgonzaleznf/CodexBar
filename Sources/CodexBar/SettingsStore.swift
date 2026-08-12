@@ -303,7 +303,8 @@ final class SettingsStore {
         copilotTokenStore: any CopilotTokenStoring = KeychainCopilotTokenStore(),
         tokenAccountStore: any ProviderTokenAccountStoring = FileTokenAccountStore(),
         antigravityOAuthCredentialsStore: AntigravityOAuthCredentialsStore = AntigravityOAuthCredentialsStore(),
-        performInitialProviderDetection: Bool = !SettingsStore.isRunningTests)
+        performInitialProviderDetection: Bool = !SettingsStore.isRunningTests,
+        writesLaunchResetsToRawState: Bool = !SettingsStore.isRunningTests)
     {
         if !Self.isRunningTests {
             _ = UserProviderPluginRegistry.refresh()
@@ -380,11 +381,13 @@ final class SettingsStore {
         self.ensureAlibabaProviderAutoEnabledIfNeeded()
         self.applyTokenCostDefaultIfNeeded()
         if self.claudeUsageDataSource != .cli {
-            if Self.isRunningTests {
-                self.claudeWebExtrasEnabled = false
-            } else {
+            // Why: this reset is CLI-scoped on purpose. The statusLine feed is deliberately not cleared
+            // here — the planner emits its step only under `.auto`, which is exactly the branch this
+            // condition covers, so resetting it would clear the opt-in in the one mode that consumes it.
+            if writesLaunchResetsToRawState {
                 self.defaultsState.claudeWebExtrasEnabledRaw = false
-                self.defaultsState.claudeStatusLineFeedEnabledRaw = false
+            } else {
+                self.claudeWebExtrasEnabled = false
             }
         }
         let resolvedOpenAIWebAccessEnabled = if hasStoredOpenAIWebAccessPreference {

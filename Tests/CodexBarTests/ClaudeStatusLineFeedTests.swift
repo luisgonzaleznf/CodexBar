@@ -195,4 +195,29 @@ struct ClaudeStatusLineSettingsReachabilityTests {
         // The planner reads this snapshot field; without it the step can never become available.
         #expect(settings.claudeSettingsSnapshot(tokenOverride: nil).statusLineFeedEnabled == true)
     }
+
+    @Test
+    func `an enabled feed survives the launch reset that clears Claude web extras`() throws {
+        let suiteName = "ClaudeStatusLineFeed-launch-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: "claudeStatusLineFeedEnabled")
+        defaults.set(true, forKey: "claudeWebExtrasEnabled")
+
+        // `writesLaunchResetsToRawState: true` selects the production launch path. Tests normally take the
+        // other branch, which is why the suite stayed green while a real launch cleared the enabled feed.
+        let settings = testSettingsStore(
+            suiteName: suiteName,
+            userDefaults: defaults,
+            writesLaunchResetsToRawState: true)
+
+        // Auto is the only mode that plans the feed's step, and it is also the mode this reset covers, so a
+        // reset that reached the feed would make the opt-in unreachable after every relaunch.
+        #expect(settings.claudeUsageDataSource == .auto)
+        #expect(settings.claudeStatusLineFeedEnabled)
+        #expect(settings.claudeSettingsSnapshot(tokenOverride: nil).statusLineFeedEnabled == true)
+        // The CLI-scoped reset it sits next to must keep working.
+        #expect(!settings.claudeWebExtrasEnabled)
+    }
 }
