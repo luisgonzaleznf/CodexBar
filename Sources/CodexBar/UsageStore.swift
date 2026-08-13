@@ -172,7 +172,21 @@ final class UsageStore {
     ///
     /// The statusLine feed carries no identity, so this is the only way to know whether the rows it would be
     /// composed over belong to the account that is active now — a swap within one profile is otherwise invisible.
-    var claudeSnapshotAccountUuid: String?
+    ///
+    /// Persisted because the snapshots it describes are: an in-memory-only record would read as "unknown owner"
+    /// after every relaunch, against restored rows whose owner was in fact known when they were stored.
+    var claudeSnapshotAccountUuid: String? {
+        get { self.settings.userDefaults.string(forKey: Self.claudeSnapshotAccountUuidKey) }
+        set {
+            guard let newValue else {
+                self.settings.userDefaults.removeObject(forKey: Self.claudeSnapshotAccountUuidKey)
+                return
+            }
+            self.settings.userDefaults.set(newValue, forKey: Self.claudeSnapshotAccountUuidKey)
+        }
+    }
+
+    static let claudeSnapshotAccountUuidKey = "claudeSnapshotAccountUuid"
     var lastSourceLabels: [ProviderInstanceID: String] = [:]
     var lastFetchAttempts: [ProviderInstanceID: [ProviderFetchAttempt]] = [:]
     var accountSnapshots: [ProviderInstanceID: [TokenAccountUsageSnapshot]] = [:]

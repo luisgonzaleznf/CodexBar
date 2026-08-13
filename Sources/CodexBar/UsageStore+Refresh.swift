@@ -714,8 +714,8 @@ extension UsageStore {
             } else {
                 self.lastKnownResetSnapshots[provider.instanceID]
             }
-            // nil means the partial statusLine feed cannot be attributed safely; see the helper.
-            guard let merged = self.composedSnapshot(accountScoped, provider, result, context) else { return nil }
+            // Always publishes something: an unattributable statusLine feed narrows what is shown, never halts.
+            let merged = self.composedSnapshot(accountScoped, provider, result, context)
             let stabilized = Self.commandCodeSnapshotResolvingDepletionOnEnrichmentFailure(
                 current: self.preservingDeepSeekProfileCatalog(in: merged, provider: provider),
                 previous: self.snapshots[provider.instanceID])
@@ -741,7 +741,7 @@ extension UsageStore {
                 self.handleCodexResetCreditNotifications(snapshot: backfilled)
             }
             self.lastKnownResetSnapshots[provider.instanceID] = backfilled
-            self.storeSnapshot(backfilled, provider: provider, sourceLabel: result.sourceLabel)
+            self.storeSnapshot(backfilled, provider: provider)
             self.widgetUsagePreservationBlockedProviders.remove(provider.instanceID)
             if provider == .deepseek {
                 self.clearDeepSeekProfileTransition()
