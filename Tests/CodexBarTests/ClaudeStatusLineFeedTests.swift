@@ -197,6 +197,40 @@ struct ClaudeStatusLineSettingsReachabilityTests {
     }
 
     @Test
+    func `the ownership gate reaches the provider settings snapshot`() {
+        let settings = testSettingsStore(suiteName: "ClaudeStatusLineFeed-ownership-reach")
+        settings.claudeStatusLineFeedEnabled = true
+
+        // Nothing has established an owner yet, so the feed is not offered as a source no matter what the
+        // environment says. The planner reads this field; without it the gate can never take effect.
+        #expect(settings.claudeSettingsSnapshot(tokenOverride: nil).statusLineFeedRowsAreOwned == false)
+    }
+
+    @Test
+    func `ownership tracks the recorded account against the active one`() throws {
+        let settings = testSettingsStore(suiteName: "ClaudeStatusLineFeed-ownership-compare")
+        settings.userDefaults.set("account-a", forKey: UsageStore.claudeSnapshotAccountUuidKey)
+
+        #expect(try settings.claudeStatusLineFeedRowsAreOwned(environment: self.profile("account-a")))
+        #expect(try !settings.claudeStatusLineFeedRowsAreOwned(environment: self.profile("account-b")))
+    }
+
+    /// A Claude profile whose config names `accountUuid`, plus the environment pointing at it.
+    private func profile(_ accountUuid: String) throws -> [String: String] {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("""
+        {
+          "oauthAccount": {
+            "accountUuid": "\(accountUuid)"
+          }
+        }
+        """.utf8).write(to: directory.appendingPathComponent(".claude.json"))
+        return [ClaudeConfigPaths.configDirectoryEnvironmentKey: directory.path]
+    }
+
+    @Test
     func `an enabled feed survives the launch reset that clears Claude web extras`() throws {
         let suiteName = "ClaudeStatusLineFeed-launch-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))

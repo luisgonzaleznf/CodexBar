@@ -11,6 +11,16 @@ enum ClaudeStatusLineRowOwnership {
     case unknown
 }
 
+/// What a refresh should publish, and whether the fetched result is what it came from.
+///
+/// The source label has to travel with the snapshot rather than be assumed from the result: a discarded
+/// observation republishes the previous rows, and labelling those as statusLine-sourced would have the card
+/// claim an old OAuth or CLI reading came from the user's status line.
+struct ClaudeComposedSnapshot {
+    let snapshot: UsageSnapshot
+    let usedFetchedResult: Bool
+}
+
 /// Split out of `UsageStore+Refresh.swift` to keep that file within the file-length limit.
 extension UsageStore {
     /// Applies the Claude statusLine composition to a scoped result before it is stored.
@@ -18,7 +28,7 @@ extension UsageStore {
         _ scoped: UsageSnapshot,
         _ provider: UsageProvider,
         _ result: ProviderFetchResult,
-        _ context: ProviderRefreshOutcomeContext) -> UsageSnapshot
+        _ context: ProviderRefreshOutcomeContext) -> ClaudeComposedSnapshot
     {
         // Provider-specific by design: the statusLine feed is a Claude-only source, so every other provider
         // must reach the composition helper with no source label and pass straight through it.
@@ -37,37 +47,55 @@ extension UsageStore {
     /// usage — so publishing it as-is would blank every one of those rows. The owner ruling for this source is
     /// that it composes with the polled sources and never replaces them, which is what this restores.
     ///
-    /// Always returns a snapshot to publish. An earlier revision returned nil when the observation could not be
-    /// attributed, which stopped the refresh dead: the fetch pipeline had already accepted the statusLine result,
-    /// so nothing fell through to the CLI probe and the card kept whatever it was last showing. Rejection now
-    /// chooses between the rows it can still trust rather than between publishing and not publishing.
+    /// Always reports a snapshot to publish, and says whether it came from the fetched observation. Returning nil
+    /// stopped the refresh dead in an earlier revision: the pipeline had already accepted the statusLine result,
+    /// so nothing fell through to the CLI probe. The unusable cases now republish what is already on the card and
+    /// mark the result unused, so the caller keeps the label the visible rows were actually fetched under.
+    ///
+    /// In production these unusable cases are unreachable — an unowned feed is not planned as a source at all, so
+    /// the step never runs. They are kept because the planner's inputs are sampled a moment before the fetch, and
+    /// a discarded observation must not be able to change what the card claims about itself.
     static func claudeSnapshotComposingStatusLineFeed(
         current: UsageSnapshot,
         previous: UsageSnapshot?,
         sourceLabel: String?,
         accountIsStable: Bool,
-        ownership: ClaudeStatusLineRowOwnership) -> UsageSnapshot
+        ownership: ClaudeStatusLineRowOwnership) -> ClaudeComposedSnapshot
     {
-        guard self.isClaudeStatusLineSourceLabel(sourceLabel) else { return current }
+        let used = { ClaudeComposedSnapshot(snapshot: $0, usedFetchedResult: true) }
+        guard self.isClaudeStatusLineSourceLabel(sourceLabel) else { return used(current) }
         // Nothing to compose with: no prior rows exist, so none can be lost. Publishing the windows alone is
         // additive rather than destructive.
-        guard let previous else { return current }
-        // The account moved during this very fetch, so the stored rows describe whoever was signed in before.
-        guard accountIsStable else { return current }
+        guard let previous else { return used(current) }
+        let discarded = ClaudeComposedSnapshot(snapshot: previous, usedFetchedResult: false)
+        // The account moved during this very fetch, so nothing here describes it: the stored rows belong to
+        // whoever was signed in before, and the observation cannot say which account it counted.
+        guard accountIsStable else { return discarded }
 
         switch ownership {
         case .owned:
-            return current.composingOverPreviousClaudeSnapshot(previous)
-        case .foreign:
-            // A different account owns the stored rows. Publishing the windows alone drops the identity, plan and
-            // extra rows with it, which is the point: carrying them over is exactly the mislabelling to avoid.
-            return current
-        case .unknown:
-            // Not knowing is not the same as knowing they are foreign. Blanking verified rows on a guess would be
-            // a visible regression for anyone whose account UUID cannot be read, so leave the card as it stands
-            // and let the next poll of a real source decide.
-            return previous
+            return used(current.composingOverPreviousClaudeSnapshot(previous))
+        case .foreign, .unknown:
+            // The observation carries no account of its own and its drop file is shared by every account on the
+            // profile, so it cannot be attributed to the active one. Publishing it anyway — even stripped of
+            // identity — would put another account's numbers on the card; blanking the stored rows would throw
+            // away verified data on a guess. Keep what is there and let a source that knows its own account
+            // re-establish ownership.
+            return discarded
         }
+    }
+
+    /// Records where the published rows came from.
+    ///
+    /// A discarded observation republishes the previous rows, so the label has to stay with them: the card reads
+    /// this to say where its numbers came from, and those numbers were not fetched by this result.
+    func recordSourceLabel(
+        _ sourceLabel: String?,
+        provider: UsageProvider,
+        composition: ClaudeComposedSnapshot)
+    {
+        guard composition.usedFetchedResult else { return }
+        self.lastSourceLabels[provider.instanceID] = sourceLabel
     }
 
     /// Whether the account that produced the stored Claude rows is still the active one.
@@ -85,30 +113,37 @@ extension UsageStore {
         return recorded == active ? .owned : .foreign
     }
 
-    /// Stores a provider snapshot, recording which Claude account produced it.
+    /// Stores a provider snapshot, recording which Claude account owns it.
     func storeSnapshot(
         _ snapshot: UsageSnapshot,
         provider: UsageProvider,
+        sourceLabel: String?,
         environment: [String: String] = ProcessInfo.processInfo.environment)
     {
         self.snapshots[provider.instanceID] = snapshot
-        self.recordClaudeSnapshotAccount(provider: provider, environment: environment)
+        self.recordClaudeSnapshotAccount(
+            provider: provider,
+            sourceLabel: sourceLabel,
+            environment: environment)
     }
 
-    /// Records the account that was active when a Claude snapshot was stored.
+    /// Records the account that owns a stored Claude snapshot.
     ///
-    /// This covers feed-sourced snapshots too. The feed carries no identity of its own, but the account UUID here
-    /// is read from the environment rather than from the observation, so it is evidence about the moment the rows
-    /// were stored — which is exactly what the next composition needs to ask about.
+    /// Only sources that carry their own identity may establish this. Recording the *active* account against a
+    /// feed observation would manufacture evidence the observation does not contain: the drop file is scoped to
+    /// the profile rather than the account, and its freshness window is minutes wide, so a file written by the
+    /// previous account's session would be stamped as belonging to the new one and composed beneath its identity
+    /// on the next refresh.
     func recordClaudeSnapshotAccount(
         provider: UsageProvider,
+        sourceLabel: String?,
         environment: [String: String] = ProcessInfo.processInfo.environment)
     {
         // Provider-specific by design: Claude is the only provider whose stored rows can be composed over by a
         // later identity-free source, so it is the only one that needs its owner recorded.
-        guard provider == .claude else { return }
-        // An unreadable account must not erase a known one: that would turn `.owned` into `.unknown` and freeze
-        // the card until the next successful poll of a real source.
+        guard provider == .claude, !Self.isClaudeStatusLineSourceLabel(sourceLabel) else { return }
+        // An unreadable account must not erase a known one: that would drop ownership to unknown and take the
+        // feed out of the plan until the next successful poll of a real source.
         guard let uuid = ClaudeAccountProfile.accountUuid(environment: environment) else { return }
         self.claudeSnapshotAccountUuid = uuid
     }

@@ -51,16 +51,16 @@ struct ClaudeStatusLineCompositionTests {
             ownership: .owned)
 
         // Windows come from the live feed.
-        #expect(composed.primary?.usedPercent == 77)
-        #expect(composed.secondary?.usedPercent == 88)
-        #expect(composed.updatedAt == Date(timeIntervalSince1970: 2000))
+        #expect(composed.snapshot.primary?.usedPercent == 77)
+        #expect(composed.snapshot.secondary?.usedPercent == 88)
+        #expect(composed.snapshot.updatedAt == Date(timeIntervalSince1970: 2000))
 
         // Everything the feed cannot know is preserved rather than blanked.
-        #expect(composed.identity?.accountEmail == "person@example.com")
-        #expect(composed.identity?.loginMethod == "Max 20x")
-        #expect(composed.tertiary?.usedPercent == 30)
-        #expect(composed.extraRateWindows?.count == 1)
-        #expect(composed.dataConfidence == .exact)
+        #expect(composed.snapshot.identity?.accountEmail == "person@example.com")
+        #expect(composed.snapshot.identity?.loginMethod == "Max 20x")
+        #expect(composed.snapshot.tertiary?.usedPercent == 30)
+        #expect(composed.snapshot.extraRateWindows?.count == 1)
+        #expect(composed.snapshot.dataConfidence == .exact)
     }
 
     @Test
@@ -74,8 +74,8 @@ struct ClaudeStatusLineCompositionTests {
                 accountIsStable: true,
                 ownership: .owned)
             // Composition must not touch the polled sources' own results.
-            #expect(result.identity?.accountEmail == "person@example.com")
-            #expect(result.primary?.usedPercent == 10)
+            #expect(result.snapshot.identity?.accountEmail == "person@example.com")
+            #expect(result.snapshot.primary?.usedPercent == 10)
         }
     }
 
@@ -88,24 +88,23 @@ struct ClaudeStatusLineCompositionTests {
             sourceLabel: "statusline",
             accountIsStable: true,
             ownership: .owned)
-        #expect(composed.primary?.usedPercent == 77)
-        #expect(composed.identity == nil)
+        #expect(composed.snapshot.primary?.usedPercent == 77)
+        #expect(composed.snapshot.identity == nil)
     }
 
     @Test
-    func `an account change since the last snapshot drops the rows it invalidates`() {
-        // The feed carries no account identity, so it cannot be shown over another account's rows. It publishes
-        // its windows alone instead: the stale identity goes, which is the mixed-account card the siloing rule
-        // forbids, but the refresh still produces something rather than stalling the chain.
+    func `an account change during the fetch discards the observation`() {
+        // Neither side can be trusted: the stored rows belong to whoever was signed in before, and the
+        // observation cannot say which account it counted. Publishing its windows anyway would put one account's
+        // numbers on the other's card.
         let result = UsageStore.claudeSnapshotComposingStatusLineFeed(
             current: self.feedSnapshot(),
             previous: self.polledSnapshot(),
             sourceLabel: "statusline",
             accountIsStable: false,
             ownership: .owned)
-        #expect(result.identity == nil)
-        #expect(result.tertiary == nil)
-        #expect(result.primary?.usedPercent == 77)
+        #expect(result.snapshot.primary?.usedPercent == 10)
+        #expect(result.usedFetchedResult == false)
     }
 
     @Test
@@ -117,7 +116,7 @@ struct ClaudeStatusLineCompositionTests {
             sourceLabel: "oauth",
             accountIsStable: false,
             ownership: .owned)
-        #expect(result.identity?.accountEmail == "person@example.com")
+        #expect(result.snapshot.identity?.accountEmail == "person@example.com")
     }
 
     @Test
@@ -131,10 +130,38 @@ struct ClaudeStatusLineCompositionTests {
             sourceLabel: "statusline",
             accountIsStable: true,
             ownership: .foreign)
-        // The other account's identity and extra rows must not survive alongside these windows.
-        #expect(result.identity == nil)
-        #expect(result.extraRateWindows == nil)
-        #expect(result.primary?.usedPercent == 77)
+        // Publishing the windows even stripped of identity would show another account's numbers, because the
+        // drop file is shared by every account on the profile. The card keeps what it had.
+        #expect(result.snapshot.primary?.usedPercent == 10)
+        #expect(result.snapshot.identity?.accountEmail == "person@example.com")
+        #expect(result.usedFetchedResult == false)
+    }
+
+    @Test
+    func `a discarded observation does not relabel the card as statusLine sourced`() {
+        // The card renders "From your Claude statusLine config" off the recorded source label. A discarded
+        // observation republishes the previous rows, so claiming this result's label would have the card
+        // attribute an old OAuth or CLI reading to the user's status line.
+        for ownership in [ClaudeStatusLineRowOwnership.foreign, .unknown] {
+            let result = UsageStore.claudeSnapshotComposingStatusLineFeed(
+                current: self.feedSnapshot(),
+                previous: self.polledSnapshot(),
+                sourceLabel: "statusline",
+                accountIsStable: true,
+                ownership: ownership)
+            #expect(result.usedFetchedResult == false, "\(ownership) must not claim the fetched label")
+        }
+    }
+
+    @Test
+    func `a composed observation does claim its own label`() {
+        let result = UsageStore.claudeSnapshotComposingStatusLineFeed(
+            current: self.feedSnapshot(),
+            previous: self.polledSnapshot(),
+            sourceLabel: "statusline",
+            accountIsStable: true,
+            ownership: .owned)
+        #expect(result.usedFetchedResult)
     }
 
     @Test
@@ -147,10 +174,10 @@ struct ClaudeStatusLineCompositionTests {
             sourceLabel: "statusline",
             accountIsStable: true,
             ownership: .unknown)
-        #expect(result.identity?.accountEmail == "person@example.com")
-        #expect(result.tertiary?.usedPercent == 30)
+        #expect(result.snapshot.identity?.accountEmail == "person@example.com")
+        #expect(result.snapshot.tertiary?.usedPercent == 30)
         // Not the feed's windows: they could not be attributed, so they are not shown.
-        #expect(result.primary?.usedPercent == 10)
+        #expect(result.snapshot.primary?.usedPercent == 10)
     }
 
     @Test
@@ -170,7 +197,7 @@ struct ClaudeStatusLineCompositionTests {
                 sourceLabel: "statusline",
                 accountIsStable: stable,
                 ownership: ownership)
-            #expect(result.primary != nil, "stable=\(stable) ownership=\(ownership) published nothing")
+            #expect(result.snapshot.primary != nil, "stable=\(stable) ownership=\(ownership) published nothing")
         }
     }
 
@@ -182,7 +209,7 @@ struct ClaudeStatusLineCompositionTests {
             sourceLabel: "oauth",
             accountIsStable: true,
             ownership: .foreign)
-        #expect(result.identity?.accountEmail == "person@example.com")
+        #expect(result.snapshot.identity?.accountEmail == "person@example.com")
     }
 
     /// Builds a Claude profile whose config names `accountUuid`, plus the environment that points at it.
@@ -219,16 +246,45 @@ struct ClaudeStatusLineCompositionTests {
     }
 
     @Test
-    func `a second feed refresh still composes after the first published feed only rows`() throws {
-        // The sequence that wedged the card: refresh one has no previous snapshot, so it publishes feed-only
-        // rows. If storing those rows records no owner, refresh two cannot attribute them — and because the
-        // pipeline had already accepted the statusLine result, the CLI probe never ran to break the tie.
+    func `a feed observation never establishes who owns the rows it produced`() throws {
+        // The observation carries no account, and its drop file is shared by every account on the profile.
+        // Recording the active account against it would let a file written by the previous account's session be
+        // composed beneath the new account's identity on the very next refresh.
         let environment = try self.claudeProfile(accountUuid: "account-a")
         let store = self.makeStore(suiteName: "ClaudeStatusLineComposition-sequence")
 
-        store.storeSnapshot(self.feedSnapshot(), provider: .claude, environment: environment)
+        store.storeSnapshot(
+            self.feedSnapshot(),
+            provider: .claude,
+            sourceLabel: "statusline",
+            environment: environment)
 
-        #expect(store.claudeSnapshotAccountUuid == "account-a")
+        #expect(store.claudeSnapshotAccountUuid == nil)
+        #expect(store.claudeStatusLineRowOwnership(environment: environment) == .unknown)
+    }
+
+    @Test
+    func `a poll that carries its own identity is what establishes ownership`() throws {
+        let environment = try self.claudeProfile(accountUuid: "account-a")
+        let store = self.makeStore(suiteName: "ClaudeStatusLineComposition-establish")
+
+        for label in ["oauth", "cli", "web"] {
+            let scoped = self.makeStore(suiteName: "ClaudeStatusLineComposition-establish-\(label)")
+            scoped.storeSnapshot(
+                self.polledSnapshot(),
+                provider: .claude,
+                sourceLabel: label,
+                environment: environment)
+            #expect(
+                scoped.claudeStatusLineRowOwnership(environment: environment) == .owned,
+                "\(label) must establish ownership")
+        }
+
+        store.storeSnapshot(
+            self.polledSnapshot(),
+            provider: .claude,
+            sourceLabel: "cli",
+            environment: environment)
         #expect(store.claudeStatusLineRowOwnership(environment: environment) == .owned)
     }
 
@@ -238,6 +294,7 @@ struct ClaudeStatusLineCompositionTests {
         try store.storeSnapshot(
             self.polledSnapshot(),
             provider: .claude,
+            sourceLabel: "oauth",
             environment: self.claudeProfile(accountUuid: "account-a"))
 
         let afterSwitch = try self.claudeProfile(accountUuid: "account-b")
@@ -246,14 +303,16 @@ struct ClaudeStatusLineCompositionTests {
 
     @Test
     func `an unreadable account does not erase an owner that was already recorded`() throws {
-        // Overwriting with nil would turn `.owned` into `.unknown` and freeze the card on the next feed refresh.
+        // Overwriting with nil would drop ownership to unknown and take the feed out of the plan until the next
+        // successful poll of a real source.
         let environment = try self.claudeProfile(accountUuid: "account-a")
         let store = self.makeStore(suiteName: "ClaudeStatusLineComposition-erase")
-        store.storeSnapshot(self.polledSnapshot(), provider: .claude, environment: environment)
+        store.storeSnapshot(self.polledSnapshot(), provider: .claude, sourceLabel: "oauth", environment: environment)
 
         try store.storeSnapshot(
-            self.feedSnapshot(),
+            self.polledSnapshot(),
             provider: .claude,
+            sourceLabel: "oauth",
             environment: self.unreadableClaudeProfile())
 
         #expect(store.claudeSnapshotAccountUuid == "account-a")
@@ -270,7 +329,7 @@ struct ClaudeStatusLineCompositionTests {
             browserDetection: BrowserDetection(cacheTTL: 0),
             settings: settings,
             startupBehavior: .testing)
-        store.storeSnapshot(self.polledSnapshot(), provider: .claude, environment: environment)
+        store.storeSnapshot(self.polledSnapshot(), provider: .claude, sourceLabel: "oauth", environment: environment)
 
         // A second store over the same defaults stands in for the next launch.
         let relaunched = UsageStore(
@@ -295,8 +354,8 @@ struct ClaudeStatusLineCompositionTests {
             sourceLabel: "statusline",
             accountIsStable: true,
             ownership: .owned)
-        #expect(composed.primary?.usedPercent == 66)
+        #expect(composed.snapshot.primary?.usedPercent == 66)
         // An absent window means "no update", not "cleared".
-        #expect(composed.secondary?.usedPercent == 20)
+        #expect(composed.snapshot.secondary?.usedPercent == 20)
     }
 }

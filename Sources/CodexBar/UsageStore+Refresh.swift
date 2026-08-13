@@ -714,10 +714,10 @@ extension UsageStore {
             } else {
                 self.lastKnownResetSnapshots[provider.instanceID]
             }
-            // Always publishes something: an unattributable statusLine feed narrows what is shown, never halts.
-            let merged = self.composedSnapshot(accountScoped, provider, result, context)
+            // Always publishes something: an unattributable statusLine feed keeps the card, never halts the chain.
+            let composition = self.composedSnapshot(accountScoped, provider, result, context)
             let stabilized = Self.commandCodeSnapshotResolvingDepletionOnEnrichmentFailure(
-                current: self.preservingDeepSeekProfileCatalog(in: merged, provider: provider),
+                current: self.preservingDeepSeekProfileCatalog(in: composition.snapshot, provider: provider),
                 previous: self.snapshots[provider.instanceID])
             let backfilled = stabilized.backfillingResetTimes(from: resetBackfillSource)
             let warningAccountDiscriminator = Self.warningAccountDiscriminator(
@@ -741,7 +741,7 @@ extension UsageStore {
                 self.handleCodexResetCreditNotifications(snapshot: backfilled)
             }
             self.lastKnownResetSnapshots[provider.instanceID] = backfilled
-            self.storeSnapshot(backfilled, provider: provider)
+            self.storeSnapshot(backfilled, provider: provider, sourceLabel: result.sourceLabel)
             self.widgetUsagePreservationBlockedProviders.remove(provider.instanceID)
             if provider == .deepseek {
                 self.clearDeepSeekProfileTransition()
@@ -754,7 +754,7 @@ extension UsageStore {
                 self.publishConfirmedEmptyTokenSnapshot(for: provider)
                 self.tokenErrors[provider.instanceID] = nil
             }
-            self.lastSourceLabels[provider.instanceID] = result.sourceLabel
+            self.recordSourceLabel(result.sourceLabel, provider: provider, composition: composition)
             self.recordProviderFetchSuccessErrorState(provider: provider)
             self.diagnostics[provider.instanceID] = result.diagnostic
             if let tokenAccount = currentTokenAccount {

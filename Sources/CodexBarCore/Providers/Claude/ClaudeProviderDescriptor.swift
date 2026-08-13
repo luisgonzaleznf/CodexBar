@@ -333,7 +333,15 @@ public enum ClaudeProviderDescriptor {
             statusLineFeedEnabled: statusLineFeedEnabled,
             // Probing for a drop file is a cheap directory read and cannot mutate credential state, so unlike
             // the OAuth preflight above it is safe to answer honestly at planning time.
+            //
+            // Ownership is part of availability rather than a downstream check. The observation carries no
+            // account of its own, so once this step is planned and succeeds, the chain has stopped and every
+            // remaining option is bad: publish rows that cannot be attributed, or publish nothing and leave the
+            // card frozen. Unowned rows mean the step is simply not offered, and OAuth → CLI → web proceeds as
+            // it did before the feed existed. A poll from a real source re-establishes ownership and the feed
+            // becomes available again by itself.
             hasStatusLineObservation: statusLineFeedEnabled
+                && (context.settings?.claude?.statusLineFeedRowsAreOwned ?? false)
                 && Self.hasFreshStatusLineObservation(context: context))
     }
 
