@@ -1,257 +1,287 @@
 import Foundation
 import Testing
 @testable import CodexBar
+@testable import CodexBarCLI
 @testable import CodexBarCore
 
-/// The opt-in statusLine feed must compose with the polled sources and never replace them (owner ruling, #2733).
+@Suite(.serialized)
 struct ClaudeStatusLineFeedTests {
-    private func plan(
-        feedEnabled: Bool,
-        hasObservation: Bool,
-        selected: ClaudeUsageDataSource = .auto,
-        hasCLI: Bool = true,
-        hasWebSession: Bool = true) -> ClaudeFetchPlan
-    {
-        ClaudeSourcePlanner.resolve(input: ClaudeSourcePlanningInput(
-            runtime: .app,
-            selectedDataSource: selected,
-            webExtrasEnabled: false,
-            hasWebSession: hasWebSession,
-            hasCLI: hasCLI,
-            hasOAuthCredentials: true,
-            statusLineFeedEnabled: feedEnabled,
-            hasStatusLineObservation: hasObservation))
-    }
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
     private func limits(
-        configDir: String?,
-        capturedAt: Date,
+        profileID: String = "profile-a",
+        capturedAt: Date? = nil,
         fiveHour: Double? = 40,
         sevenDay: Double? = 60) -> ClaudeStatusLineRateLimits
     {
         ClaudeStatusLineRateLimits(
-            configDir: configDir,
-            capturedAt: capturedAt,
-            fiveHour: fiveHour.map { ClaudeStatusLineWindow(usedPercent: $0, resetsAt: nil) },
-            sevenDay: sevenDay.map { ClaudeStatusLineWindow(usedPercent: $0, resetsAt: nil) })
+            profileID: profileID,
+            capturedAt: capturedAt ?? self.now,
+            fiveHour: fiveHour.map {
+                ClaudeStatusLineWindow(usedPercent: $0, resetsAt: self.now.addingTimeInterval(3600))
+            },
+            sevenDay: sevenDay.map {
+                ClaudeStatusLineWindow(usedPercent: $0, resetsAt: self.now.addingTimeInterval(86400))
+            })
     }
 
-    // MARK: - Opt-in
-
-    @Test
-    func `the feed is absent from the auto order until it is switched on`() {
-        let plan = self.plan(feedEnabled: false, hasObservation: true)
-        #expect(!plan.availableSteps.contains { $0.dataSource == .statusline })
-        // Off by default, so the ordinary chain is untouched.
-        #expect(plan.availableSteps.first?.dataSource == .oauth)
+    private func settings(
+        enabled: Bool = true,
+        keychainDisabled: Bool = true,
+        standaloneAllowed: Bool = true,
+        source: ClaudeUsageDataSource = .auto) -> ProviderSettingsSnapshot
+    {
+        .make(claude: ClaudeProviderSettings(
+            usageDataSource: source,
+            webExtrasEnabled: false,
+            statusLineFeedEnabled: enabled,
+            keychainAccessDisabled: keychainDisabled,
+            statusLineStandaloneAllowed: standaloneAllowed,
+            cookieSource: .off,
+            manualCookieHeader: nil))
     }
 
-    @Test
-    func `enabling the feed without an observation still leaves the chain untouched`() {
-        let plan = self.plan(feedEnabled: true, hasObservation: false)
-        #expect(!plan.availableSteps.contains { $0.dataSource == .statusline })
+    private func context(
+        sourceMode: ProviderSourceMode = .auto,
+        environment: [String: String] = [:],
+        settings: ProviderSettingsSnapshot? = nil,
+        selectedTokenAccountID: UUID? = nil) -> ProviderFetchContext
+    {
+        let browser = BrowserDetection(cacheTTL: 0)
+        return ProviderFetchContext(
+            runtime: .app,
+            sourceMode: sourceMode,
+            includeCredits: false,
+            webTimeout: 1,
+            webDebugDumpHTML: false,
+            verbose: false,
+            env: environment,
+            settings: settings,
+            fetcher: UsageFetcher(environment: environment),
+            claudeFetcher: ClaudeUsageFetcher(browserDetection: browser),
+            browserDetection: browser,
+            selectedTokenAccountID: selectedTokenAccountID)
     }
 
-    @Test
-    func `the feed is never offered as a user selectable source`() {
-        #expect(!ClaudeUsageDataSource.statusline.isUserSelectable)
-        #expect(!ClaudeUsageDataSource.userSelectableCases.contains(.statusline))
-        // Every other source stays selectable.
-        #expect(ClaudeUsageDataSource.userSelectableCases.count == ClaudeUsageDataSource.allCases.count - 1)
-    }
-
-    // MARK: - Composition
-
-    @Test
-    func `the feed sits behind OAuth and ahead of the CLI probe`() throws {
-        let order = self.plan(feedEnabled: true, hasObservation: true)
-            .availableSteps.map(\.dataSource)
-        let oauth = try #require(order.firstIndex(of: .oauth))
-        let statusline = try #require(order.firstIndex(of: .statusline))
-        let cli = try #require(order.firstIndex(of: .cli))
-        // Composes rather than replaces: a working OAuth read still wins.
-        #expect(oauth < statusline)
-        #expect(statusline < cli)
-    }
-
-    @Test
-    func `an explicit source selection is not joined by the feed`() {
-        for selected in [ClaudeUsageDataSource.oauth, .web, .cli] {
-            let plan = self.plan(feedEnabled: true, hasObservation: true, selected: selected)
-            #expect(
-                !plan.executionSteps.contains { $0.dataSource == .statusline },
-                "explicit \(selected.rawValue) must not gain a statusline step")
-        }
-    }
-
-    // MARK: - Attribution and freshness
-
-    @Test
-    func `an observation from another profile is never adopted`() {
-        let foreign = self.limits(configDir: "/Users/x/.claude-work", capturedAt: Date())
-        #expect(ClaudeStatusLineDropStore.select(
-            candidates: [foreign],
-            expectedConfigDir: "/Users/x/.claude") == nil)
-        // The ambient profile matches only observations that also reported no config dir.
-        #expect(ClaudeStatusLineDropStore.select(
-            candidates: [foreign],
-            expectedConfigDir: nil) == nil)
+    private func strategyIDs(_ context: ProviderFetchContext) async -> [String] {
+        await ProviderDescriptorRegistry.descriptor(for: .claude)
+            .fetchPlan.pipeline.resolveStrategies(context).map(\.id)
     }
 
     @Test
-    func `a stale observation loses to no observation at all`() {
-        let now = Date(timeIntervalSince1970: 1_000_000)
-        let stale = self.limits(
-            configDir: nil,
-            capturedAt: now.addingTimeInterval(-ClaudeStatusLineDropStore.freshnessWindow - 1))
-        #expect(ClaudeStatusLineDropStore.select(
-            candidates: [stale],
-            expectedConfigDir: nil,
-            now: now) == nil)
+    func `standalone feed is limited to keychain disabled ambient Auto`() async {
+        let eligible = self.context(settings: self.settings())
+        #expect(await self.strategyIDs(eligible).first == "claude.statusline.standalone")
+
+        let keychainEnabled = self.context(settings: self.settings(keychainDisabled: false))
+        let keychainEnabledIDs = await self.strategyIDs(keychainEnabled)
+        #expect(!keychainEnabledIDs.contains("claude.statusline.standalone"))
+
+        let explicitCLI = self.context(sourceMode: .cli, settings: self.settings(source: .cli))
+        let explicitCLIIDs = await self.strategyIDs(explicitCLI)
+        #expect(!explicitCLIIDs.contains("claude.statusline.standalone"))
+
+        let selectedToken = self.context(settings: self.settings(), selectedTokenAccountID: UUID())
+        let selectedTokenIDs = await self.strategyIDs(selectedToken)
+        #expect(!selectedTokenIDs.contains("claude.statusline.standalone"))
+
+        let multiAccount = self.context(settings: self.settings(standaloneAllowed: false))
+        let multiAccountIDs = await self.strategyIDs(multiAccount)
+        #expect(!multiAccountIDs.contains("claude.statusline.standalone"))
     }
 
     @Test
-    func `the newest matching observation wins`() throws {
-        let now = Date(timeIntervalSince1970: 1_000_000)
-        let older = self.limits(configDir: nil, capturedAt: now.addingTimeInterval(-600), fiveHour: 10)
-        let newer = self.limits(configDir: nil, capturedAt: now.addingTimeInterval(-60), fiveHour: 80)
-        let picked = try #require(ClaudeStatusLineDropStore.select(
-            candidates: [older, newer],
-            expectedConfigDir: nil,
-            now: now))
-        #expect(picked.fiveHour?.usedPercent == 80)
+    func `Admin API remains authoritative and never receives an observation overlay`() async {
+        let env = [ClaudeAdminAPISettingsReader.adminAPIKeyEnvironmentKey: "sk-ant-admin-test"]
+        let context = self.context(environment: env, settings: self.settings())
+        #expect(await self.strategyIDs(context) == ["claude.admin-api"])
     }
 
     @Test
-    func `modest clock skew does not blank a live feed`() {
-        let now = Date(timeIntervalSince1970: 1_000_000)
-        let skewed = self.limits(configDir: nil, capturedAt: now.addingTimeInterval(120))
-        #expect(ClaudeStatusLineDropStore.select(
-            candidates: [skewed],
-            expectedConfigDir: nil,
-            now: now) != nil)
+    func `keychain enabled mode falls through to the existing source plan`() async {
+        let context = self.context(settings: self.settings(keychainDisabled: false))
+        let ids = await self.strategyIDs(context)
+        #expect(ids.first == "claude.oauth")
+        #expect(!ids.contains("claude.statusline.standalone"))
     }
 
     @Test
-    func `an implausibly future observation is rejected rather than trusted forever`() {
-        // Unbounded future timestamps would stay fresh indefinitely — the same defect as an absent one.
-        let now = Date(timeIntervalSince1970: 1_000_000)
-        let farFuture = self.limits(
-            configDir: nil,
-            capturedAt: now.addingTimeInterval(ClaudeStatusLineDropStore.maximumClockSkew + 60))
-        #expect(ClaudeStatusLineDropStore.select(
-            candidates: [farFuture],
-            expectedConfigDir: nil,
-            now: now) == nil)
-    }
-
-    // MARK: - Snapshot mapping
-
-    @Test
-    func `a weekly only observation is dropped rather than shifted into the session lane`() {
-        // This snapshot is composed over a previous one where primary is the session lane, so promoting a
-        // weekly-only reading — as the standalone OAuth mapping does — would render the 7-day figure as the
-        // Session row while the real weekly row survived beside it.
-        let weeklyOnly = self.limits(configDir: nil, capturedAt: Date(), fiveHour: nil, sevenDay: 55)
-        #expect(ClaudeStatusLineDropStore.makeSnapshot(from: weeklyOnly) == nil)
+    func `standalone mapping is anonymous and reduced fidelity`() async throws {
+        let context = self.context(settings: self.settings())
+        let observation = self.limits()
+        let loader: ClaudeStatusLineFetchStrategy.ObservationLoader = { _ in observation }
+        let outcome = await ClaudeStatusLineFetchStrategy.$observationLoaderOverrideForTesting
+            .withValue(loader) {
+                await ProviderDescriptorRegistry.descriptor(for: .claude).fetchOutcome(context: context)
+            }
+        let result = try outcome.result.get()
+        #expect(result.sourceLabel == ClaudeStatusLineFeed.standaloneSourceLabel)
+        #expect(result.usage.primary?.usedPercent == 40)
+        #expect(result.usage.secondary?.usedPercent == 60)
+        #expect(result.usage.tertiary == nil)
+        #expect(result.usage.extraRateWindows == nil)
+        #expect(result.usage.providerCost == nil)
+        #expect(result.usage.identity == nil)
     }
 
     @Test
-    func `a session only observation keeps its lane and leaves the weekly row alone`() throws {
-        let sessionOnly = self.limits(configDir: nil, capturedAt: Date(), fiveHour: 33, sevenDay: nil)
-        let snapshot = try #require(ClaudeStatusLineDropStore.makeSnapshot(from: sessionOnly))
-        #expect(snapshot.primary.usedPercent == 33)
-        #expect(snapshot.primary.windowMinutes == 300)
-        // Absent weekly means "no update" — composition keeps the previous weekly row.
+    func `weekly only observation stays in the weekly lane`() throws {
+        let weeklyOnly = self.limits(fiveHour: nil, sevenDay: 55)
+        let snapshot = try #require(ClaudeStatusLineDropStore.makeSnapshot(from: weeklyOnly))
+        #expect(snapshot.primary == nil)
+        #expect(snapshot.secondary?.usedPercent == 55)
+        #expect(snapshot.secondary?.windowMinutes == 10080)
+    }
+
+    @Test
+    func `five hour only observation stays in the primary lane`() throws {
+        let fiveHourOnly = self.limits(fiveHour: 31, sevenDay: nil)
+        let snapshot = try #require(ClaudeStatusLineDropStore.makeSnapshot(from: fiveHourOnly))
+        #expect(snapshot.primary?.usedPercent == 31)
+        #expect(snapshot.primary?.windowMinutes == 300)
         #expect(snapshot.secondary == nil)
     }
 
     @Test
-    func `the snapshot carries no identity for the card to mislabel`() throws {
-        let snapshot = try #require(
-            ClaudeStatusLineDropStore.makeSnapshot(from: self.limits(configDir: nil, capturedAt: Date())))
-        // Provider siloing: this feed knows nothing about the account, so it must not assert identity.
-        #expect(snapshot.accountEmail == nil)
-        #expect(snapshot.accountOrganization == nil)
-        #expect(snapshot.primary.windowMinutes == 300)
-        #expect(snapshot.secondary?.windowMinutes == 10080)
+    func `store accepts either window and rejects an empty observation`() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codexbar-statusline-partial-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let weeklyOnly = self.limits(fiveHour: nil, sevenDay: 27)
+        try ClaudeStatusLineDropStore.write(weeklyOnly, applicationSupport: root)
+        let loaded = try #require(ClaudeStatusLineDropStore.load(
+            applicationSupport: root,
+            expectedProfileID: weeklyOnly.profileID,
+            now: self.now))
+        #expect(loaded.fiveHour == nil)
+        #expect(loaded.sevenDay?.usedPercent == 27)
+
+        let empty = self.limits(fiveHour: nil, sevenDay: nil)
+        #expect(throws: ClaudeStatusLineFileError.invalidObservation) {
+            try ClaudeStatusLineDropStore.write(empty, applicationSupport: root)
+        }
+    }
+
+    @Test
+    func `stale future and wrong profile observations are absence`() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codexbar-statusline-store-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for (observation, expectedProfile) in [
+            (self.limits(capturedAt: self.now.addingTimeInterval(-901)), "profile-a"),
+            (self.limits(capturedAt: self.now.addingTimeInterval(301)), "profile-a"),
+            (self.limits(profileID: "profile-a"), "profile-b"),
+        ] {
+            try ClaudeStatusLineDropStore.write(observation, applicationSupport: root)
+            #expect(ClaudeStatusLineDropStore.load(
+                applicationSupport: root,
+                expectedProfileID: expectedProfile,
+                now: self.now) == nil)
+        }
+    }
+
+    @Test
+    func `capture persists a minimal private allowlisted observation`() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codexbar-statusline-capture-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let inputURL = root.appendingPathComponent("input.json")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data(#"""
+        {"rate_limits":{"five_hour":{"used_percentage":12,"resets_at":1800003600},
+        "seven_day":{"used_percentage":34,"resets_at":1800086400}},
+        "session_id":"secret","cwd":"/private/repo","cost":{"usd":20},"unknown":"discard"}
+        """#.utf8).write(to: inputURL)
+        let handle = try FileHandle(forReadingFrom: inputURL)
+        CodexBarCLI.runClaudeStatusLineCapture(
+            input: handle,
+            environment: [:],
+            applicationSupport: root,
+            now: self.now)
+        try handle.close()
+
+        let profileID = ClaudeStatusLineProfile.identifier(environment: [:])
+        let url = ClaudeStatusLineDropStore.observationURL(applicationSupport: root, profileID: profileID)
+        let data = try Data(contentsOf: url)
+        let text = try #require(String(data: data, encoding: .utf8))
+        for forbidden in ["session_id", "secret", "cwd", "/private/repo", "cost", "unknown"] {
+            #expect(!text.contains(forbidden))
+        }
+        let fileMode = try #require(
+            (FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)?.intValue)
+        let directoryMode = try #require((FileManager.default.attributesOfItem(
+            atPath: ClaudeStatusLineDropStore.directoryURL(applicationSupport: root).path)[
+            .posixPermissions,
+        ] as? NSNumber)?.intValue)
+        #expect(fileMode == 0o600)
+        #expect(directoryMode == 0o700)
+    }
+
+    @Test
+    func `bounded stdin rejects oversized payloads`() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codexbar-statusline-large-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data(repeating: 0x20, count: 17).write(to: url)
+        let handle = try FileHandle(forReadingFrom: url)
+        #expect(try CodexBarCLI.readBoundedInput(handle, limit: 16) == nil)
+        try handle.close()
+    }
+
+    @Test
+    func `observation writer rejects a symlink destination`() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codexbar-statusline-symlink-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let observation = self.limits()
+        let directory = ClaudeStatusLineDropStore.directoryURL(applicationSupport: root)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let target = root.appendingPathComponent("target.json")
+        try Data(#"{}"#.utf8).write(to: target)
+        try FileManager.default.createSymbolicLink(
+            at: ClaudeStatusLineDropStore.observationURL(
+                applicationSupport: root,
+                profileID: observation.profileID),
+            withDestinationURL: target)
+        #expect(throws: ClaudeStatusLineFileError.symbolicLink(
+            ClaudeStatusLineDropStore.observationURL(
+                applicationSupport: root,
+                profileID: observation.profileID).path))
+        {
+            try ClaudeStatusLineDropStore.write(observation, applicationSupport: root)
+        }
     }
 }
 
-/// Guards the gap the planner tests above cannot see: they build `ClaudeSourcePlanningInput` directly, so they
-/// pass even when nothing carries the user's toggle into it. The first version of this feature was unreachable
-/// for exactly that reason.
 @MainActor
-struct ClaudeStatusLineSettingsReachabilityTests {
+struct ClaudeStatusLineSettingsTests {
     @Test
-    func `the feed toggle reaches the provider settings snapshot`() {
-        let settings = testSettingsStore(suiteName: "ClaudeStatusLineFeed-reachability")
-
-        // Off by default (owner ruling, #2733).
+    func `opt in persists across relaunch and reaches the provider snapshot`() throws {
+        let suite = "ClaudeStatusLineSettings-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var settings = testSettingsStore(suiteName: suite, userDefaults: defaults)
         #expect(!settings.claudeStatusLineFeedEnabled)
-        #expect(settings.claudeSettingsSnapshot(tokenOverride: nil).statusLineFeedEnabled == false)
-
         settings.claudeStatusLineFeedEnabled = true
-        // The planner reads this snapshot field; without it the step can never become available.
-        #expect(settings.claudeSettingsSnapshot(tokenOverride: nil).statusLineFeedEnabled == true)
-    }
-
-    @Test
-    func `the ownership gate reaches the provider settings snapshot`() {
-        let settings = testSettingsStore(suiteName: "ClaudeStatusLineFeed-ownership-reach")
-        settings.claudeStatusLineFeedEnabled = true
-
-        // Nothing has established an owner yet, so the feed is not offered as a source no matter what the
-        // environment says. The planner reads this field; without it the gate can never take effect.
-        #expect(settings.claudeSettingsSnapshot(tokenOverride: nil).statusLineFeedRowsAreOwned == false)
-    }
-
-    @Test
-    func `ownership tracks the recorded account against the active one`() throws {
-        let settings = testSettingsStore(suiteName: "ClaudeStatusLineFeed-ownership-compare")
-        settings.userDefaults.set("account-a", forKey: UsageStore.claudeSnapshotAccountUuidKey)
-
-        #expect(try settings.claudeStatusLineFeedRowsAreOwned(environment: self.profile("account-a")))
-        #expect(try !settings.claudeStatusLineFeedRowsAreOwned(environment: self.profile("account-b")))
-    }
-
-    /// A Claude profile whose config names `accountUuid`, plus the environment pointing at it.
-    private func profile(_ accountUuid: String) throws -> [String: String] {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try Data("""
-        {
-          "oauthAccount": {
-            "accountUuid": "\(accountUuid)"
-          }
-        }
-        """.utf8).write(to: directory.appendingPathComponent(".claude.json"))
-        return [ClaudeConfigPaths.configDirectoryEnvironmentKey: directory.path]
-    }
-
-    @Test
-    func `an enabled feed survives the launch reset that clears Claude web extras`() throws {
-        let suiteName = "ClaudeStatusLineFeed-launch-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defaults.removePersistentDomain(forName: suiteName)
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        defaults.set(true, forKey: "claudeStatusLineFeedEnabled")
-        defaults.set(true, forKey: "claudeWebExtrasEnabled")
-
-        // `writesLaunchResetsToRawState: true` selects the production launch path. Tests normally take the
-        // other branch, which is why the suite stayed green while a real launch cleared the enabled feed.
-        let settings = testSettingsStore(
-            suiteName: suiteName,
-            userDefaults: defaults,
-            writesLaunchResetsToRawState: true)
-
-        // Auto is the only mode that plans the feed's step, and it is also the mode this reset covers, so a
-        // reset that reached the feed would make the opt-in unreachable after every relaunch.
-        #expect(settings.claudeUsageDataSource == .auto)
+        settings = testSettingsStore(suiteName: suite, userDefaults: defaults)
         #expect(settings.claudeStatusLineFeedEnabled)
-        #expect(settings.claudeSettingsSnapshot(tokenOverride: nil).statusLineFeedEnabled == true)
-        // The CLI-scoped reset it sits next to must keep working.
-        #expect(!settings.claudeWebExtrasEnabled)
+        #expect(settings.claudeSettingsSnapshot(tokenOverride: nil).statusLineFeedEnabled)
+    }
+
+    @Test
+    func `configured token accounts and claude swap disable standalone presentation`() {
+        let tokenSettings = testSettingsStore(suiteName: "ClaudeStatusLineSettings-token")
+        tokenSettings.debugDisableKeychainAccess = true
+        tokenSettings.claudeStatusLineFeedEnabled = true
+        tokenSettings.addTokenAccount(provider: .claude, label: "Token", token: "Bearer sk-ant-oat-test")
+        #expect(!tokenSettings.claudeSettingsSnapshot(tokenOverride: nil).statusLineStandaloneAllowed)
+
+        let swapSettings = testSettingsStore(suiteName: "ClaudeStatusLineSettings-swap")
+        swapSettings.debugDisableKeychainAccess = true
+        swapSettings.claudeStatusLineFeedEnabled = true
+        swapSettings.claudeSwapEnabled = true
+        #expect(!swapSettings.claudeSettingsSnapshot(tokenOverride: nil).statusLineStandaloneAllowed)
     }
 }

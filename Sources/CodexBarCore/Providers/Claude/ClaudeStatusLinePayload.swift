@@ -1,7 +1,15 @@
+import Crypto
 import Foundation
 
-/// One rate-limit window as published by Claude Code to its configured statusLine command.
-public struct ClaudeStatusLineWindow: Equatable, Sendable {
+public enum ClaudeStatusLineFeed {
+    public static let standaloneSourceLabel = "statusline-standalone"
+    public static let schemaVersion = 1
+    public static let maximumInputBytes = 1_048_576
+    /// StatusLine reset epochs outside 2000-01-01 through 2100-01-01 are treated as drifted metadata.
+    public static let validResetEpochSecondsRange: ClosedRange<Double> = 946_684_800...4_102_444_800
+}
+
+public struct ClaudeStatusLineWindow: Codable, Equatable, Sendable {
     public let usedPercent: Double
     public let resetsAt: Date?
 
@@ -11,104 +19,80 @@ public struct ClaudeStatusLineWindow: Equatable, Sendable {
     }
 }
 
-/// A single statusLine observation, attributed to the Claude profile that produced it.
-public struct ClaudeStatusLineRateLimits: Equatable, Sendable {
-    /// `CLAUDE_CONFIG_DIR` of the reporting session; nil for the ambient default profile.
-    public let configDir: String?
+public struct ClaudeStatusLineRateLimits: Codable, Equatable, Sendable {
+    public let profileID: String
     public let capturedAt: Date
     public let fiveHour: ClaudeStatusLineWindow?
     public let sevenDay: ClaudeStatusLineWindow?
 
     public init(
-        configDir: String?,
+        profileID: String,
         capturedAt: Date,
         fiveHour: ClaudeStatusLineWindow?,
         sevenDay: ClaudeStatusLineWindow?)
     {
-        self.configDir = configDir
+        self.profileID = profileID
         self.capturedAt = capturedAt
         self.fiveHour = fiveHour
         self.sevenDay = sevenDay
     }
 }
 
-/// Parses the payload a user-configured Claude statusLine command forwards to CodexBar.
-///
-/// Every failure returns nil. The status line is the user's own configuration and Claude Code may change the
-/// schema at any time, so a drifted payload has to read as "no live data" and leave the polled sources
-/// untouched — never as an error on the card (AGENTS.md, owner ruling on #2733).
-public enum ClaudeStatusLinePayloadParser {
-    /// Envelope version this build understands. An unknown version is absence, not an error.
-    public static let currentSchemaVersion = 1
+public enum ClaudeStatusLineProfile {
+    public static func identifier(environment: [String: String]) -> String {
+        let raw = environment[ClaudeConfigPaths.configDirectoryEnvironmentKey] ?? ""
+        let material = raw.isEmpty ? "codexbar.claude-statusline.default" : "codexbar.claude-statusline.\(raw)"
+        return SHA256.hash(data: Data(material.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+}
 
-    public static func parse(_ data: Data, now _: Date = Date()) -> ClaudeStatusLineRateLimits? {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        guard let schema = self.finiteNumber(root["schema"]), Int(schema) == self.currentSchemaVersion else {
-            return nil
-        }
-        guard let payload = self.object(root["payload"]),
-              let rateLimits = self.object(payload["rate_limits"])
+/// Parses Claude Code's statusLine stdin. Only the two documented rate-limit windows are accepted.
+public enum ClaudeStatusLinePayloadParser {
+    public static func parseOfficialPayload(
+        _ data: Data,
+        capturedAt: Date = Date(),
+        environment: [String: String] = ProcessInfo.processInfo.environment) -> ClaudeStatusLineRateLimits?
+    {
+        guard data.count <= ClaudeStatusLineFeed.maximumInputBytes,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rateLimits = root["rate_limits"] as? [String: Any]
         else { return nil }
 
         let fiveHour = self.window(rateLimits["five_hour"])
         let sevenDay = self.window(rateLimits["seven_day"])
         guard fiveHour != nil || sevenDay != nil else { return nil }
-
-        // Why: a drop file with no usable capture time cannot be aged, and defaulting to "now" would make a
-        // file that has sat on disk for hours look perpetually fresh — defeating the staleness bound that keeps
-        // a dead session from outranking a live poll. Absence is the safe answer.
-        guard let capturedAt = self.date(root["capturedAt"]) else { return nil }
-
         return ClaudeStatusLineRateLimits(
-            configDir: self.nonemptyString(root["configDir"]),
+            profileID: ClaudeStatusLineProfile.identifier(environment: environment),
             capturedAt: capturedAt,
             fiveHour: fiveHour,
             sevenDay: sevenDay)
     }
 
-    // MARK: - Field decoding
-
-    /// The shim buffers Claude's stdin verbatim, so the payload may arrive as an object or as an embedded string.
-    private static func object(_ raw: Any?) -> [String: Any]? {
-        if let object = raw as? [String: Any] { return object }
-        guard let text = self.nonemptyString(raw), let data = text.data(using: .utf8) else { return nil }
-        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    }
-
     private static func window(_ raw: Any?) -> ClaudeStatusLineWindow? {
-        guard let object = self.object(raw) else { return nil }
-        // `utilization` is the OAuth-shaped sibling of `used_percentage`; accepting both means a rename
-        // upstream degrades to one missing window rather than a silent dark feed.
-        guard let used = self.finiteNumber(object["used_percentage"]) ?? self.finiteNumber(object["utilization"])
+        guard let object = raw as? [String: Any],
+              let used = self.finiteNumber(object["used_percentage"]),
+              (0...100).contains(used)
         else { return nil }
-        // A percentage outside 0...100 means the schema no longer says what we think it says.
-        guard (0...100).contains(used) else { return nil }
-        return ClaudeStatusLineWindow(usedPercent: used, resetsAt: self.date(object["resets_at"]))
+        return ClaudeStatusLineWindow(usedPercent: used, resetsAt: self.resetDate(object["resets_at"]))
     }
 
-    private static func date(_ raw: Any?) -> Date? {
-        if let seconds = self.finiteNumber(raw) {
-            return Date(timeIntervalSince1970: seconds)
-        }
-        guard let text = self.nonemptyString(raw) else { return nil }
-        if let seconds = Double(text), seconds.isFinite {
-            return Date(timeIntervalSince1970: seconds)
-        }
-        return ISO8601DateFormatter().date(from: text)
+    private static func resetDate(_ raw: Any?) -> Date? {
+        guard let seconds = self.finiteNumber(raw),
+              ClaudeStatusLineFeed.validResetEpochSecondsRange.contains(seconds)
+        else { return nil }
+        return Date(timeIntervalSince1970: seconds)
     }
 
     private static func finiteNumber(_ raw: Any?) -> Double? {
-        guard let number = raw as? NSNumber else { return nil }
-        // Foundation bridges JSON booleans to NSNumber, so `as? Double` would accept `true`. `is Bool` cannot
-        // separate them either — it answers true for the numbers 0 and 1 — so compare the CoreFoundation type.
-        guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        guard let number = raw as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID()
+        else { return nil }
         let value = number.doubleValue
         return value.isFinite ? value : nil
     }
+}
 
-    private static func nonemptyString(_ raw: Any?) -> String? {
-        guard let text = raw as? String else { return nil }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
+struct ClaudeStatusLineObservationEnvelope: Codable, Equatable {
+    let schema: Int
+    let observation: ClaudeStatusLineRateLimits
 }

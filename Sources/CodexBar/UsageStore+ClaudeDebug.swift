@@ -106,9 +106,6 @@ extension UsageStore {
             case .auto:
                 lines.append("Auto source selected.")
                 return lines.joined(separator: "\n")
-            case .statusline:
-                lines.append("Claude statusLine feed selected (opt-in, user-configured).")
-                return lines.joined(separator: "\n")
             case .api:
                 let hasAdminKey = ProviderTokenResolver.token(
                     for: .claude,

@@ -21,9 +21,7 @@ extension UsageStore {
         return lhsKey == rhsKey
     }
 
-    /// Internal rather than private: the Claude statusLine composition helper lives in its own file to
-    /// keep this one within the file-length limit, and needs this context type.
-    struct ProviderRefreshOutcomeContext {
+    private struct ProviderRefreshOutcomeContext {
         let generation: UInt64
         let claudeUsesConsumerAutoPipeline: Bool
         let codexExpectedGuard: CodexAccountScopedRefreshGuard?
@@ -714,10 +712,9 @@ extension UsageStore {
             } else {
                 self.lastKnownResetSnapshots[provider.instanceID]
             }
-            // Always publishes something: an unattributable statusLine feed keeps the card, never halts the chain.
-            let composition = self.composedSnapshot(accountScoped, provider, result, context)
+            let profileStable = self.preservingDeepSeekProfileCatalog(in: accountScoped, provider: provider)
             let stabilized = Self.commandCodeSnapshotResolvingDepletionOnEnrichmentFailure(
-                current: self.preservingDeepSeekProfileCatalog(in: composition.snapshot, provider: provider),
+                current: profileStable,
                 previous: self.snapshots[provider.instanceID])
             let backfilled = stabilized.backfillingResetTimes(from: resetBackfillSource)
             let warningAccountDiscriminator = Self.warningAccountDiscriminator(
@@ -741,7 +738,7 @@ extension UsageStore {
                 self.handleCodexResetCreditNotifications(snapshot: backfilled)
             }
             self.lastKnownResetSnapshots[provider.instanceID] = backfilled
-            self.storeSnapshot(backfilled, provider: provider, sourceLabel: result.sourceLabel)
+            self.snapshots[provider.instanceID] = backfilled
             self.widgetUsagePreservationBlockedProviders.remove(provider.instanceID)
             if provider == .deepseek {
                 self.clearDeepSeekProfileTransition()
@@ -754,7 +751,7 @@ extension UsageStore {
                 self.publishConfirmedEmptyTokenSnapshot(for: provider)
                 self.tokenErrors[provider.instanceID] = nil
             }
-            self.recordSourceLabel(result.sourceLabel, provider: provider, composition: composition)
+            self.lastSourceLabels[provider.instanceID] = result.sourceLabel
             self.recordProviderFetchSuccessErrorState(provider: provider)
             self.diagnostics[provider.instanceID] = result.diagnostic
             if let tokenAccount = currentTokenAccount {
@@ -1002,9 +999,7 @@ extension UsageStore {
             // Explicit OAuth records sourced from the Claude file/cache require a stable account
             // observation before their unavailable-Keychain owner can enter history.
             return true
-        case .api, .web, .statusline, nil:
-            // The statusLine feed carries no credential and asserts no identity, so it can never establish
-            // an account observation.
+        case .api, .web, nil:
             return false
         }
     }
@@ -1114,7 +1109,7 @@ extension UsageStore {
                 self = .api
             case .oauth:
                 self = .oauth
-            case .auto, .statusline, nil:
+            case .auto, nil:
                 return nil
             }
         }

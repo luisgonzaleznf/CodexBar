@@ -1,10 +1,8 @@
 import Foundation
 
-/// Serves the 5h/7d windows a user-configured Claude statusLine command forwarded to CodexBar.
-///
-/// Opt-in and off by default. It joins the Auto order behind OAuth and ahead of the CLI probe, so it fills the
-/// gap when the polled sources are cooling down or unavailable, and never pre-empts a successful OAuth read
-/// (owner ruling, #2733).
+/// Supplies an anonymous ambient Claude card only while the user's global Keychain-disable preference is on.
+/// The provider descriptor excludes explicit credentials, non-Auto sources, and multi-account presentations
+/// before this strategy can enter the chain.
 struct ClaudeStatusLineFetchStrategy: ProviderFetchStrategy {
     typealias ObservationLoader = @Sendable (ProviderFetchContext) -> ClaudeStatusLineRateLimits?
 
@@ -12,15 +10,8 @@ struct ClaudeStatusLineFetchStrategy: ProviderFetchStrategy {
     @TaskLocal static var observationLoaderOverrideForTesting: ObservationLoader?
     #endif
 
-    let id: String = "claude.statusline"
-    /// Nearest existing kind: this reads an artifact the user's own tooling dropped on disk.
+    let id = "claude.statusline.standalone"
     let kind: ProviderFetchKind = .localProbe
-
-    private let observationLoader: ObservationLoader?
-
-    init(observationLoader: ObservationLoader? = nil) {
-        self.observationLoader = observationLoader
-    }
 
     func isAvailable(_ context: ProviderFetchContext) async -> Bool {
         self.loadObservation(context) != nil
@@ -28,19 +19,14 @@ struct ClaudeStatusLineFetchStrategy: ProviderFetchStrategy {
 
     func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
         guard let limits = self.loadObservation(context),
-              let usage = ClaudeStatusLineDropStore.makeSnapshot(from: limits)
-        else {
-            // Absence, not an error: the user simply is not running Claude Code right now, or the payload
-            // drifted. Falling through leaves the remaining planner steps to serve the card.
-            throw ClaudeStatusLineFetchError.noFreshObservation
-        }
+              let snapshot = ClaudeStatusLineDropStore.makeSnapshot(from: limits)
+        else { throw ClaudeStatusLineFetchError.noFreshObservation }
         return self.makeResult(
-            usage: claudeStatusLineUsageSnapshot(from: usage),
-            sourceLabel: ClaudeUsageDataSource.statusline.sourceLabel)
+            usage: snapshot,
+            sourceLabel: ClaudeStatusLineFeed.standaloneSourceLabel)
     }
 
-    func shouldFallback(on error: Error, context: ProviderFetchContext) -> Bool {
-        // Always: this feed is supplementary by construction, so its absence must never end the chain.
+    func shouldFallback(on error: Error, context _: ProviderFetchContext) -> Bool {
         !ClaudeOAuthFetchError.isCancellation(error)
     }
 
@@ -50,15 +36,11 @@ struct ClaudeStatusLineFetchStrategy: ProviderFetchStrategy {
             return override(context)
         }
         #endif
-        if let observationLoader {
-            return observationLoader(context)
-        }
         guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
         else { return nil }
-        let directory = ClaudeStatusLineDropStore.directoryURL(applicationSupport: support)
-        return ClaudeStatusLineDropStore.select(
-            candidates: ClaudeStatusLineDropStore.loadCandidates(directory: directory),
-            expectedConfigDir: context.env[ClaudeConfigPaths.configDirectoryEnvironmentKey])
+        return ClaudeStatusLineDropStore.load(
+            applicationSupport: support,
+            expectedProfileID: ClaudeStatusLineProfile.identifier(environment: context.env))
     }
 }
 

@@ -14,8 +14,6 @@ extension SettingsStore {
             case .oauth: .oauth
             case .web: .web
             case .cli: .cli
-            // Never user-selectable: the feed participates only inside Auto, so persist Auto.
-            case .statusline: .auto
             }
             self.updateProviderConfig(provider: .claude) { entry in
                 entry.source = source
@@ -107,7 +105,8 @@ extension SettingsStore {
                 hasSelectedAccount: account != nil),
             webExtrasEnabled: self.claudeWebExtrasEnabled,
             statusLineFeedEnabled: self.claudeStatusLineFeedEnabled,
-            statusLineFeedRowsAreOwned: self.claudeStatusLineFeedRowsAreOwned(),
+            keychainAccessDisabled: self.debugDisableKeychainAccess,
+            statusLineStandaloneAllowed: self.claudeStatusLineStandaloneAllowed(account: account),
             cookieSource: self.claudeSnapshotCookieSource(tokenOverride: tokenOverride, routing: routing),
             manualCookieHeader: self.claudeSnapshotCookieHeader(
                 routing: routing,
@@ -115,18 +114,13 @@ extension SettingsStore {
             organizationID: account?.sanitizedOrganizationID)
     }
 
-    /// Whether the stored Claude rows are provably owned by the account that is active now.
-    ///
-    /// Read from the same persisted key `UsageStore` writes when it stores a snapshot from a source that carries
-    /// its own identity. An unknown value on either side answers false: the feed may only ever supplement rows
-    /// whose owner is established, never assert one.
-    func claudeStatusLineFeedRowsAreOwned(
-        environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool
-    {
-        guard let recorded = self.userDefaults.string(forKey: UsageStore.claudeSnapshotAccountUuidKey),
-              let active = ClaudeAccountProfile.accountUuid(environment: environment)
-        else { return false }
-        return recorded == active
+    private func claudeStatusLineStandaloneAllowed(account: ProviderTokenAccount?) -> Bool {
+        self.debugDisableKeychainAccess &&
+            self.claudeStatusLineFeedEnabled &&
+            self.claudeUsageDataSource == .auto &&
+            account == nil &&
+            self.tokenAccounts(for: .claude).isEmpty &&
+            !self.claudeSwapEnabled
     }
 
     private static func claudeUsageDataSource(from source: ProviderSourceMode?) -> ClaudeUsageDataSource {
@@ -192,7 +186,9 @@ extension SettingsStore {
         if routing.adminAPIKey != nil {
             return .off
         }
-        if self.tokenAccounts(for: .claude).isEmpty { return fallback }
+        if self.tokenAccounts(for: .claude).isEmpty {
+            return fallback
+        }
         return .manual
     }
 

@@ -12,7 +12,7 @@ struct ClaudeLoginFlowTests {
 
         // Only user-selectable sources round-trip through settings; the statusLine feed is never a selection,
         // so it persists as Auto by design and has nothing to preserve here.
-        for source in ClaudeUsageDataSource.userSelectableCases {
+        for source in ClaudeUsageDataSource.allCases {
             let settings = testSettingsStore(
                 suiteName: "ClaudeLoginFlowTests-controller-\(source.rawValue)")
             settings.statusChecksEnabled = false

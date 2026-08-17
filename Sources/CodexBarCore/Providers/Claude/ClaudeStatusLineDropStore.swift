@@ -1,19 +1,15 @@
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
 import Foundation
 
-/// Reads observations forwarded by a user-configured Claude statusLine command.
-///
-/// Selection is pure and separated from the filesystem so the freshness and profile rules can be tested
-/// without touching disk, the network, or the Keychain.
 public enum ClaudeStatusLineDropStore {
-    /// A live session posts on every turn. Past this age the feed is treated as silent so the polled sources
-    /// own the card again — a stale live value must never outrank a fresh poll.
     public static let freshnessWindow: TimeInterval = 15 * 60
-
-    /// Tolerance for a shim clock running ahead of the app's. Beyond this an observation is rejected rather
-    /// than trusted: an unbounded future timestamp would stay "fresh" forever and defeat the staleness bound
-    /// just as surely as an absent one.
     public static let maximumClockSkew: TimeInterval = 5 * 60
-
     public static let directoryName = "claude-statusline"
 
     public static func directoryURL(applicationSupport: URL) -> URL {
@@ -22,69 +18,91 @@ public enum ClaudeStatusLineDropStore {
             .appendingPathComponent(self.directoryName, isDirectory: true)
     }
 
-    /// Picks the newest observation belonging to `expectedConfigDir`.
-    ///
-    /// Profile matching is not optional: the payload carries no account identity, so `CLAUDE_CONFIG_DIR` is the
-    /// only evidence tying an observation to an account, and accepting a mismatch would render one account's
-    /// numbers under another's card. A nil `expectedConfigDir` is the ambient default profile, which matches
-    /// only observations that also reported no explicit config dir.
-    public static func select(
-        candidates: [ClaudeStatusLineRateLimits],
-        expectedConfigDir: String?,
-        now: Date = Date()) -> ClaudeStatusLineRateLimits?
-    {
-        candidates
-            .filter { self.isFresh($0, now: now) && self.matchesProfile($0, expectedConfigDir: expectedConfigDir) }
-            .max { $0.capturedAt < $1.capturedAt }
+    public static func observationURL(applicationSupport: URL, profileID: String) -> URL {
+        self.directoryURL(applicationSupport: applicationSupport)
+            .appendingPathComponent("\(profileID).json", isDirectory: false)
     }
 
-    /// Modest clock skew between the shim and the app must not blank the feed, but an arbitrarily future
-    /// timestamp is not evidence of freshness — it is an observation we cannot age.
-    public static func isFresh(_ candidate: ClaudeStatusLineRateLimits, now: Date) -> Bool {
-        let age = now.timeIntervalSince(candidate.capturedAt)
+    public static func write(
+        _ observation: ClaudeStatusLineRateLimits,
+        applicationSupport: URL,
+        fileManager: FileManager = .default) throws
+    {
+        guard self.isValid(observation) else { throw ClaudeStatusLineFileError.invalidObservation }
+        let codexBarDirectory = applicationSupport.appendingPathComponent("CodexBar", isDirectory: true)
+        let directory = self.directoryURL(applicationSupport: applicationSupport)
+        try self.preparePrivateDirectory(codexBarDirectory, fileManager: fileManager)
+        try self.preparePrivateDirectory(directory, fileManager: fileManager)
+        let destination = self.observationURL(applicationSupport: applicationSupport, profileID: observation.profileID)
+        guard !self.isSymbolicLink(destination, fileManager: fileManager) else {
+            throw ClaudeStatusLineFileError.symbolicLink(destination.path)
+        }
+
+        let envelope = ClaudeStatusLineObservationEnvelope(
+            schema: ClaudeStatusLineFeed.schemaVersion,
+            observation: observation)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        try CredentialFileWriter.writePrivate(encoder.encode(envelope), to: destination)
+    }
+
+    public static func load(
+        applicationSupport: URL,
+        expectedProfileID: String,
+        now: Date = Date()) -> ClaudeStatusLineRateLimits?
+    {
+        let url = self.observationURL(applicationSupport: applicationSupport, profileID: expectedProfileID)
+        guard !self.isSymbolicLink(url),
+              let data = try? Data(contentsOf: url),
+              let envelope = self.decode(data),
+              envelope.observation.profileID == expectedProfileID,
+              self.isValid(envelope.observation),
+              self.isFresh(envelope.observation, now: now)
+        else { return nil }
+        return envelope.observation
+    }
+
+    public static func isFresh(_ observation: ClaudeStatusLineRateLimits, now: Date) -> Bool {
+        let age = now.timeIntervalSince(observation.capturedAt)
         return age <= self.freshnessWindow && age >= -self.maximumClockSkew
     }
 
-    public static func matchesProfile(
-        _ candidate: ClaudeStatusLineRateLimits,
-        expectedConfigDir: String?) -> Bool
-    {
-        self.normalizedPath(candidate.configDir) == self.normalizedPath(expectedConfigDir)
+    public static func makeSnapshot(from limits: ClaudeStatusLineRateLimits) -> UsageSnapshot? {
+        guard self.isValid(limits) else { return nil }
+        return UsageSnapshot(
+            primary: limits.fiveHour.map { self.window($0, minutes: 300) },
+            secondary: limits.sevenDay.map { self.window($0, minutes: 10080) },
+            updatedAt: limits.capturedAt,
+            identity: nil,
+            dataConfidence: .unknown)
     }
 
-    /// Reads and parses every drop file. Unreadable or drifted files are skipped, never surfaced as errors.
-    public static func loadCandidates(directory: URL, now: Date = Date()) -> [ClaudeStatusLineRateLimits] {
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
-        return names.sorted().compactMap { name in
-            guard name.hasSuffix(".json") else { return nil }
-            guard let data = try? Data(contentsOf: directory.appendingPathComponent(name)) else { return nil }
-            return ClaudeStatusLinePayloadParser.parse(data, now: now)
+    private static func decode(_ data: Data) -> ClaudeStatusLineObservationEnvelope? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        guard let envelope = try? decoder.decode(ClaudeStatusLineObservationEnvelope.self, from: data),
+              envelope.schema == ClaudeStatusLineFeed.schemaVersion
+        else { return nil }
+        return envelope
+    }
+
+    private static func isValid(_ observation: ClaudeStatusLineRateLimits) -> Bool {
+        guard !observation.profileID.isEmpty,
+              observation.capturedAt.timeIntervalSince1970.isFinite,
+              observation.fiveHour != nil || observation.sevenDay != nil
+        else { return false }
+        return [observation.fiveHour, observation.sevenDay].compactMap(\.self).allSatisfy { window in
+            window.usedPercent.isFinite &&
+                (0...100).contains(window.usedPercent) &&
+                self.isValidReset(window.resetsAt)
         }
     }
 
-    // MARK: - Snapshot mapping
-
-    /// Maps an observation onto a usage snapshot.
-    ///
-    /// Deliberately partial: this feed carries no identity, plan, model-scoped weekly, Daily Routines or extra
-    /// usage. Those rows come from the polled sources, so the caller must merge rather than replace.
-    public static func makeSnapshot(from limits: ClaudeStatusLineRateLimits) -> ClaudeUsageSnapshot? {
-        // Why: this snapshot is composed over a previous one, where `primary` is the session lane. Promoting a
-        // weekly-only observation into `primary` — as the OAuth mapping does for a standalone snapshot — would
-        // render the 7-day figure as the Session row while the real weekly row survived beside it. A weekly-only
-        // payload is therefore absence rather than a lane-shifted guess.
-        guard let fiveHour = limits.fiveHour.map({ self.window($0, minutes: 300) }) else { return nil }
-        let sevenDay = limits.sevenDay.map { self.window($0, minutes: 10080) }
-
-        return ClaudeUsageSnapshot(
-            primary: fiveHour,
-            secondary: sevenDay,
-            opus: nil,
-            updatedAt: limits.capturedAt,
-            accountEmail: nil,
-            accountOrganization: nil,
-            loginMethod: nil,
-            rawText: nil)
+    private static func isValidReset(_ reset: Date?) -> Bool {
+        guard let reset else { return true }
+        let seconds = reset.timeIntervalSince1970
+        return seconds.isFinite && ClaudeStatusLineFeed.validResetEpochSecondsRange.contains(seconds)
     }
 
     private static func window(_ source: ClaudeStatusLineWindow, minutes: Int) -> RateWindow {
@@ -95,10 +113,37 @@ public enum ClaudeStatusLineDropStore {
             resetDescription: nil)
     }
 
-    private static func normalizedPath(_ raw: String?) -> String? {
-        guard let raw else { return nil }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return URL(fileURLWithPath: trimmed, isDirectory: true).standardizedFileURL.path
+    private static func preparePrivateDirectory(_ url: URL, fileManager: FileManager) throws {
+        guard !self.isSymbolicLink(url, fileManager: fileManager) else {
+            throw ClaudeStatusLineFileError.symbolicLink(url.path)
+        }
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) {
+            guard isDirectory.boolValue else { throw ClaudeStatusLineFileError.notDirectory(url.path) }
+        } else {
+            try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
+        }
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+    }
+
+    private static func isSymbolicLink(_ url: URL, fileManager: FileManager = .default) -> Bool {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              let type = attributes[.type] as? FileAttributeType
+        else { return false }
+        return type == .typeSymbolicLink
+    }
+}
+
+public enum ClaudeStatusLineFileError: LocalizedError, Equatable {
+    case symbolicLink(String)
+    case notDirectory(String)
+    case invalidObservation
+
+    public var errorDescription: String? {
+        switch self {
+        case let .symbolicLink(path): "Refusing to write through symbolic link: \(path)"
+        case let .notDirectory(path): "Expected a directory at: \(path)"
+        case .invalidObservation: "Claude statusLine observation has no valid usage window."
+        }
     }
 }

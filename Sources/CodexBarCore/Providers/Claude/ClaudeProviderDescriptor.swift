@@ -261,7 +261,7 @@ public enum ClaudeProviderDescriptor {
         let plan = ClaudeSourcePlanner.resolve(input: planningInput)
         let webEnrichmentAccess = Self.webEnrichmentAccess(context: context)
 
-        return plan.orderedSteps.map { step in
+        var strategies: [any ProviderFetchStrategy] = plan.orderedSteps.map { step in
             let strategy: any ProviderFetchStrategy = switch step.dataSource {
             case .api:
                 ClaudeAdminAPIFetchStrategy()
@@ -280,13 +280,15 @@ public enum ClaudeProviderDescriptor {
                     manualCookieHeader: webEnrichmentAccess.manualCookieHeader,
                     browserDetection: context.browserDetection,
                     hasWebFallback: planningInput.hasWebSession)
-            case .statusline:
-                ClaudeStatusLineFetchStrategy()
             case .auto:
                 fatalError("Planner must not emit .auto as an executable step.")
             }
             return ClaudePlannedFetchStrategy(base: strategy, plannedStep: step)
         }
+        if Self.shouldUseStatusLineStandalone(context: context) {
+            strategies.insert(ClaudeStatusLineFetchStrategy(), at: 0)
+        }
+        return strategies
     }
 
     private static func hasAutoAdminAPIKey(context: ProviderFetchContext) -> Bool {
@@ -316,7 +318,6 @@ public enum ClaudeProviderDescriptor {
 
     private static func makePlanningInput(context: ProviderFetchContext) -> ClaudeSourcePlanningInput {
         let webExtrasEnabled = context.settings?.claude?.webExtrasEnabled ?? false
-        let statusLineFeedEnabled = context.settings?.claude?.statusLineFeedEnabled ?? false
         let hasWebSession = Self.hasPlausibleWebSession(context: context)
         let shouldAttemptOAuth = context.runtime == .app &&
             (context.sourceMode == .auto || context.sourceMode == .oauth)
@@ -329,29 +330,18 @@ public enum ClaudeProviderDescriptor {
             hasCLI: ClaudeCLIResolver.isAvailable(environment: context.env),
             // App Auto and explicit OAuth perform one real, noninteractive OAuth attempt. Do not preflight here:
             // a preflight can mutate cache state and make the real fetch misclassify a typed error.
-            hasOAuthCredentials: shouldAttemptOAuth,
-            statusLineFeedEnabled: statusLineFeedEnabled,
-            // Probing for a drop file is a cheap directory read and cannot mutate credential state, so unlike
-            // the OAuth preflight above it is safe to answer honestly at planning time.
-            //
-            // Ownership is part of availability rather than a downstream check. The observation carries no
-            // account of its own, so once this step is planned and succeeds, the chain has stopped and every
-            // remaining option is bad: publish rows that cannot be attributed, or publish nothing and leave the
-            // card frozen. Unowned rows mean the step is simply not offered, and OAuth → CLI → web proceeds as
-            // it did before the feed existed. A poll from a real source re-establishes ownership and the feed
-            // becomes available again by itself.
-            hasStatusLineObservation: statusLineFeedEnabled
-                && (context.settings?.claude?.statusLineFeedRowsAreOwned ?? false)
-                && Self.hasFreshStatusLineObservation(context: context))
+            hasOAuthCredentials: shouldAttemptOAuth)
     }
 
-    static func hasFreshStatusLineObservation(context: ProviderFetchContext) -> Bool {
-        guard let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+    private static func shouldUseStatusLineStandalone(context: ProviderFetchContext) -> Bool {
+        guard context.runtime == .app,
+              context.sourceMode == .auto,
+              context.selectedTokenAccountID == nil,
+              let settings = context.settings?.claude
         else { return false }
-        let directory = ClaudeStatusLineDropStore.directoryURL(applicationSupport: support)
-        return ClaudeStatusLineDropStore.select(
-            candidates: ClaudeStatusLineDropStore.loadCandidates(directory: directory),
-            expectedConfigDir: context.env[ClaudeConfigPaths.configDirectoryEnvironmentKey]) != nil
+        return settings.statusLineFeedEnabled &&
+            settings.keychainAccessDisabled &&
+            settings.statusLineStandaloneAllowed
     }
 
     private static func hasPlausibleWebSession(context: ProviderFetchContext) -> Bool {
@@ -1245,9 +1235,4 @@ enum ClaudeCLIBackgroundAvailability {
         }
     }
     #endif
-}
-
-/// Bridges the fileprivate Claude snapshot mapper to the statusLine strategy, which lives in its own file.
-func claudeStatusLineUsageSnapshot(from usage: ClaudeUsageSnapshot) -> UsageSnapshot {
-    ClaudeOAuthFetchStrategy.snapshot(from: usage)
 }

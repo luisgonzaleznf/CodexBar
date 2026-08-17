@@ -248,7 +248,7 @@ extension UsageMenuCardView.Model {
     static func isClaudeStatusLineSource(_ sourceLabel: String?) -> Bool {
         sourceLabel?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .caseInsensitiveCompare(ClaudeUsageDataSource.statusline.sourceLabel) == .orderedSame
+            .caseInsensitiveCompare(ClaudeStatusLineFeed.standaloneSourceLabel) == .orderedSame
     }
 
     static func usageNotes(input: Input) -> [String] {
@@ -258,13 +258,11 @@ extension UsageMenuCardView.Model {
             return self.kiroUsageNotes(input: input) + subscriptionNotes
         }
 
-        // The statusLine feed reports numbers the user's own Claude configuration published, so the card has to
-        // say where they came from rather than presenting them as a CodexBar reading (owner ruling, #2733).
-        //
-        // Must precede the dataConfidence check below: a composed feed snapshot inherits its confidence from the
-        // previous poll, so a prior CLI scrape would otherwise label live statusLine windows as CLI-sourced.
         if input.provider == .claude, Self.isClaudeStatusLineSource(input.sourceLabel) {
-            return [L("From your Claude statusLine config")] + subscriptionNotes
+            return [
+                L("Available 5h/7d usage from your Claude Code statusLine configuration."),
+                L("Detailed Claude limits are unavailable while Keychain access is disabled."),
+            ]
         }
 
         if input.provider == .kilo {
