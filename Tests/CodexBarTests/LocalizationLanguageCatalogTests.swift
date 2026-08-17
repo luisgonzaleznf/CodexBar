@@ -539,7 +539,9 @@ struct LocalizationLanguageCatalogTests {
             "Manual composition guide",
             "No",
             "Oasis-Token",
-            "Off by default. Reads sanitized 5-hour and/or 7-day limits when your Claude Code statusLine configuration provides them. With Keychain access disabled, it can show an anonymous reduced-detail card.",
+            "Off by default. Reads sanitized 5-hour and/or 7-day limits when your Claude Code "
+                + "statusLine configuration provides them. With Keychain access disabled, it can show an "
+                + "anonymous reduced-detail card.",
             "Password",
             "Provider",
             "Repair",
