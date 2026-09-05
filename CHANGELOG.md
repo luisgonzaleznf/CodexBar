@@ -2,6 +2,9 @@
 
 ## 0.56.6 — Unreleased
 
+### Added
+- Helmcode: add a dashboard-session provider showing per-model monthly token quotas, monthly reset timing, and the prepaid credit balance, with Helmcode Cloud and NaN Builders deployments, deployment-scoped Chrome cookie import, a persisted validated session for later refreshes, and a manual Cookie fallback (#3422).
+
 ### Fixed
 - Kiro: accept CLI plan summaries without treating them as format errors, preserve unavailable credit metrics instead of showing false zero usage, and allow existing optional API enrichment to supply valid plan numbers (partial fix for #3359). Thanks @zucram!
 - Codex cost: skip loading raw token histories for unchanged sessions while preserving exact request pricing, reasoning totals, and fork accounting; concurrent cache changes safely request a retry (#3297). Thanks @estevecastells!
